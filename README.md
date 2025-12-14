@@ -46,7 +46,7 @@ Place/keep these files alongside the exe, whether running from release or from s
   * `refuel-mode=` 0 personal (first 8 items), 1 personal (after 8 items), 2 squadron
   * `single-discord-message=` true to edit one webhook message instead of posting new ones
   * `shutdown-on-complete=` true to power off when the route finishes
-* Your route file (whatever you set in `route_file`): one system per line, plain text or a [Spansh fleet carrier router](https://spansh.co.uk/fleet-carrier) .csv file.
+* Your route file (whatever you set in `route_file`): See section [Refueling Setup](#refueling-setup) below.
 
 ### Refueling Setup
 Read this section carefully and follow the instructions, as refuelling needs to have the options set correctly in order to function.
@@ -76,7 +76,9 @@ Read this section carefully and follow the instructions, as refuelling needs to 
 * Set `tritium_slot=` equal to that number.
 
 ### Route Setup
-Either download a .csv from the Spansh fleet carrier router (easiest), or put each system of your route on a new line in `route.txt` or any other .txt file. Then set `route_file` in `settings.ini` to the file name of the route. 
+Either download a .csv from the Spansh fleet carrier router (easiest). Make sure the route name starts with `fleet-carrier-`. Or, put each system of your route on a new line in `route.txt` or any other .txt file.
+
+Whichever option you choose, set `route_file` in `settings.ini` to the file name of the route. 
 
 ### Starting the route
 * Dock with your carrier.
