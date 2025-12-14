@@ -94,7 +94,7 @@ Whichever option you choose, set `route_file` in `settings.ini` to the file name
 * Run the packaged `TraversalSystem.exe` (or `python TraversalSystem/main.py` from source), then tab to the Elite Dangerous window. It should now start to plot jumps.
 
 ## Traversal system disclaimer
-Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.
+Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account. Use at your own risk!
 
 ## Legal
 
