@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 import psutil
 import pyautogui
@@ -49,8 +49,30 @@ def slight_random_time(base: float) -> float:
 
 
 def load_route_list(route_file: Path) -> List[str]:
+    if route_file.name.startswith("fleet-carrier-") and route_file.suffix.lower() == ".csv":
+        return _load_carrier_csv(route_file)
+
     content = route_file.read_text(encoding="utf-8").strip()
     route = [line.strip() for line in content.splitlines() if line.strip()]
+    if not route:
+        raise ValueError("Route file is empty. Exiting...")
+    return route
+
+
+def _load_carrier_csv(route_file: Path) -> List[str]:
+    def extract_names(rows: Iterable[str]) -> List[str]:
+        systems: List[str] = []
+        for row in rows:
+            parts = row.split(",")
+            if not parts:
+                continue
+            name = parts[0].strip().strip('"')
+            if name and name.lower() != "system name":
+                systems.append(name)
+        return systems
+
+    lines = route_file.read_text(encoding="utf-8").splitlines()
+    route = extract_names(lines[1:])  # skip header if present
     if not route:
         raise ValueError("Route file is empty. Exiting...")
     return route
