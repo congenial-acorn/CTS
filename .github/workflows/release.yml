@@ -1,0 +1,66 @@
+name: Release Traversal System
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build Traversal executable (onedir)
+        run: |
+          pyinstaller TraversalSystem/main.py --onedir --name TraversalSystem --distpath TraversalSystem/pyinstaller --workpath TraversalSystem/pyinstaller/build --specpath TraversalSystem/pyinstaller --python-option u --noconfirm
+
+      - name: Prepare release bundle
+        shell: pwsh
+        run: |
+          $distRoot = "TraversalSystem/pyinstaller"
+          $bundleDir = "release-bundle/TraversalSystem"
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          Copy-Item "$distRoot/TraversalSystem" -Destination $bundleDir -Recurse -Force
+          Copy-Item "TraversalSystem/photos.txt","TraversalSystem/res.csv","TraversalSystem/route.txt","TraversalSystem/settings.ini","TraversalSystem/settings.txt" -Destination $bundleDir -Force
+          Copy-Item "TraversalSystem/sequences" -Destination $bundleDir -Recurse -Force
+
+      - name: Create zip archive
+        id: zip
+        shell: pwsh
+        run: |
+          $zipName = "TraversalSystem_${{ github.ref_name }}.zip"
+          Compress-Archive -Path "release-bundle/*" -DestinationPath $zipName -Force
+          echo "zip_path=$zipName" >> $Env:GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      - name: Upload release asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.zip.outputs.zip_path }}
+          asset_name: ${{ steps.zip.outputs.zip_path }}
+          asset_content_type: application/zip
