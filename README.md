@@ -4,12 +4,13 @@ The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumpe
 This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
 
 ## Traversal features
-* Automatic jump plotting (or manual prompts if you prefer)
+* Automatic jump plotting
 * Supports personal and squadron carriers, including Drake-, Fortune-, Victory-, Nautilus-, and Javelin-class carriers
 * Tritium restocking workflows for personal and squadron refuel modes
 * Route time estimation and Discord webhook updates
 * Simple GUI-free workflow that drives the Elite interface directly
-* Imports routes from plain text; timings stay accurate even when jumps take longer than expected
+* Adjusts for variable jump timers
+* Imports routes from plain text
 * Supports route import from [Spansh fleet carrier router](https://spansh.co.uk/fleet-carrier). 
 
 ## Limitations
@@ -52,7 +53,7 @@ Place/keep these files alongside the exe, whether running from release or from s
   * `refuel-mode=` 0 personal (first 8 items), 1 personal (after 8 items), 2 squadron
   * `single-discord-message=` true to edit one webhook message instead of posting new ones
   * `shutdown-on-complete=` true to power off when the route finishes
-* Your route file (whatever you set in `route_file`): See section [Refueling Setup](#refueling-setup) below.
+* Your route file (whatever you set in `route_file`): See section [Route Setup](#route-setup) below.
 
 ### Refueling Setup
 Read this section carefully and follow the instructions, as refuelling needs to have the options set correctly in order to function.
@@ -89,11 +90,12 @@ Whichever option you choose, set `route_file` in `settings.ini` to the file name
 ### Starting the route
 * Dock with your carrier.
 * Make sure your cursor is over the "Carrier Services" option, and that your internal panel (right) is on the home tab.
-* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles. Make sure you've set up your [refueling configuration](#refueling-setup) and [route configuration](#route-setup) properly.
+* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles.
+* Make sure you've set up your [refueling configuration](#refueling-setup) and [route configuration](#route-setup) properly.
 * Run the packaged `TraversalSystem.exe` (or `python TraversalSystem/main.py` from source), then tab to the Elite Dangerous window. It should now start to plot jumps.
 
 ## Traversal system disclaimer
-Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.
+Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account. Use at your own risk!
 
 ## Legal
 
