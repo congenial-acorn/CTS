@@ -35,6 +35,7 @@ jobs:
           Copy-Item "$distRoot/*" -Destination $bundleDir -Recurse -Force
           Copy-Item "TraversalSystem/photos.txt","TraversalSystem/res.csv","TraversalSystem/route.txt","TraversalSystem/settings.ini" -Destination $bundleDir -Force
           Copy-Item "TraversalSystem/sequences" -Destination $bundleDir -Recurse -Force
+          Copy-Item "README.md","LICENSE" -Destination $bundleDir -Force
 
       - name: Create zip archive
         id: zip
