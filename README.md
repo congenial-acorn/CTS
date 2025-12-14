@@ -4,12 +4,13 @@ The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumpe
 This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
 
 ## Traversal features
-* Automatic jump plotting (or manual prompts if you prefer)
+* Automatic jump plotting
 * Supports personal and squadron carriers, including Drake-, Fortune-, Victory-, Nautilus-, and Javelin-class carriers
 * Tritium restocking workflows for personal and squadron refuel modes
 * Route time estimation and Discord webhook updates
 * Simple GUI-free workflow that drives the Elite interface directly
-* Imports routes from plain text; timings stay accurate even when jumps take longer than expected
+* Adjusts for variable jump timers
+* Imports routes from plain text
 * Supports route import from [Spansh fleet carrier router](https://spansh.co.uk/fleet-carrier). 
 
 ## Limitations
