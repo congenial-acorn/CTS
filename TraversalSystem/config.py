@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
 
 
-BASE_DIR = Path(__file__).resolve().parent
+def _detect_base_dir() -> Path:
+    # When running under PyInstaller onefile, resources should be loaded from
+    # the directory containing the executable, not the temporary _MEIPASS dir.
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = _detect_base_dir()
 DEFAULT_SETTINGS_PATH = BASE_DIR / "settings.txt"
 DEFAULT_OPTIONS_PATH = BASE_DIR / "settings.ini"
 
