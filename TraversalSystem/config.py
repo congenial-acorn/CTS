@@ -15,8 +15,7 @@ def _detect_base_dir() -> Path:
 
 
 BASE_DIR = _detect_base_dir()
-DEFAULT_SETTINGS_PATH = BASE_DIR / "settings.txt"
-DEFAULT_OPTIONS_PATH = BASE_DIR / "settings.ini"
+DEFAULT_SETTINGS_PATH = BASE_DIR / "settings.ini"
 
 
 def _parse_key_values(path: Path) -> Dict[str, str]:
@@ -67,23 +66,19 @@ class TraversalOptions:
 
 def load_settings(
     settings_path: Path | str | None = None,
-    options_path: Path | str | None = None,
 ) -> TraversalOptions:
-    """Load traversal settings from the two legacy files.
-
-    The previous layout scattered the files across the repo. To keep the
-    traversal system self contained, both files now live under the
-    TraversalSystem directory by default.
-    """
+    """Load traversal settings from a single settings.ini file."""
     settings_file = Path(settings_path or DEFAULT_SETTINGS_PATH).expanduser()
-    options_file = Path(options_path or DEFAULT_OPTIONS_PATH).expanduser()
+
+    # Fallback to legacy settings.txt if settings.ini is missing
+    if not settings_file.exists() and settings_file.name == "settings.ini":
+        legacy = BASE_DIR / "settings.txt"
+        if legacy.exists():
+            settings_file = legacy
 
     settings_values = _parse_key_values(settings_file)
-    options_values = _parse_key_values(options_file) if options_file.exists() else {}
 
-    journal_directory = Path(
-        settings_values.get("journal_directory", "~")
-    ).expanduser()
+    journal_directory = Path(settings_values.get("journal_directory", "~")).expanduser()
     route_file = Path(settings_values.get("route_file", "route.txt"))
     if not route_file.is_absolute():
         route_file = settings_file.parent / route_file
@@ -93,14 +88,14 @@ def load_settings(
         journal_directory=journal_directory,
         route_file=route_file,
         tritium_slot=_as_int(settings_values.get("tritium_slot"), default=0),
-        auto_plot_jumps=_as_bool(options_values.get("auto-plot-jumps"), default=True),
-        disable_refuel=_as_bool(options_values.get("disable-refuel"), default=False),
-        power_saving=_as_bool(options_values.get("power-saving"), default=False),
-        refuel_mode=_as_int(options_values.get("refuel-mode"), default=0),
+        auto_plot_jumps=_as_bool(settings_values.get("auto-plot-jumps"), default=True),
+        disable_refuel=_as_bool(settings_values.get("disable-refuel"), default=False),
+        power_saving=_as_bool(settings_values.get("power-saving"), default=False),
+        refuel_mode=_as_int(settings_values.get("refuel-mode"), default=0),
         single_discord_message=_as_bool(
-            options_values.get("single-discord-message"), default=False
+            settings_values.get("single-discord-message"), default=False
         ),
         shutdown_on_complete=_as_bool(
-            options_values.get("shutdown-on-complete"), default=True
+            settings_values.get("shutdown-on-complete"), default=True
         ),
     )

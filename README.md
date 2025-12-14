@@ -1,6 +1,7 @@
 # CATS (Carrier Administration and Traversal System)
 The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
-Everything in this repo now targets that single purpose.
+
+This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
 
 ## Traversal features
 * Automatic jump plotting (or manual prompts if you prefer)
@@ -11,7 +12,7 @@ Everything in this repo now targets that single purpose.
 * Imports routes from plain text; timings stay accurate even when jumps take longer than expected
 
 ## Limitations
-* This only works on Windows and probably won't be ported to anything else.
+* This only works on Windows. A future port to Linux is possible, though highly unlikely.
 * Odyssey is required; Horizons is not supported.
 * The autopilot has experimental support for displays running at resolutions other than 1920x1080, though most resolutions haven't been tested.
 * Elite Dangerous should be running on your primary monitor in fullscreen.
@@ -19,52 +20,66 @@ Everything in this repo now targets that single purpose.
 * Elite needs to be using the default keybinds - if you've got custom keybinds, or are using a controller or HOTAS, you should back up your binds then reset to default keyboard+mouse.
 
 ## Installation
-* Install Python and the dependencies in `requirements.txt`.
-* Configure `TraversalSystem/settings.txt` and `TraversalSystem/settings.ini` (see the comments in those files).
-* Run `TraversalSystem/main.py` directly or package it with `build_TraversalSystem.sh` (PyInstaller).
+* **Release build (recommended):** Download the latest zip from GitHub Releases. Extract it and keep everything in the extracted `TraversalSystem` folder together (exe plus data files).
+* **From source:** Install Python + `requirements.txt`, then run `python TraversalSystem/main.py` or build with `build_TraversalSystem.sh`. 
+
+## Configure settings
+Place these files alongside the exe, whether running from release or from source:
+* `settings.ini`
+* `route.txt`
+* `res.csv`
+* `photos.txt`
+* `sequences/` folder
 
 ## Traversal system usage
+### Configure the files
+* `settings.ini` (all options in one file)
+  * `webhook_url=` Discord webhook URL (leave blank to disable messages)
+  * `journal_directory=` path to your Elite Dangerous journals (e.g. `~\Saved Games\Frontier Developments\Elite Dangerous\`)
+  * `tritium_slot=` integer offset used when navigating cargo transfer for refuel
+  * `route_file=` route file path; relative paths resolve next to `settings.ini`
+  * `auto-plot-jumps=` true to let CATS plot jumps; false for manual prompts
+  * `disable-refuel=` true to skip restocking
+  * `power-saving=` true to close/reopen the game between jumps (Steam only, highly experimental)
+  * `refuel-mode=` 0 personal (first 8 items), 1 personal (after 8 items), 2 squadron
+  * `single-discord-message=` true to edit one webhook message instead of posting new ones
+  * `shutdown-on-complete=` true to power off when the route finishes
+* `route.txt` (or whatever you set in `route_file`): one system per line, plain text.
+
 ### Refuelling setup
 Read this section carefully and follow the instructions, as refuelling needs to have the options set correctly in order to function.
-
-### Important note: 16th October Type-11 Prospector Update 2
-#### FDev have indicated that fixes to transferring commodities between ships and carriers will be coming; this is likely to break refuelling. I will be testing and updating this when the update releases.
 
 #### Using a PERSONAL carrier
 * Fill the carrier's tritium depot to full (1000 tritium).
 * Use a ship with at least 200 cargo capacity.
 * Fill your ship's cargo hold with tritium FROM your carrier.
-* In the cargo transfer menu on your carrier, there will be 2 entries for tritium. Locate the entry with tritium in the CARRIER, not in the ship.
 * If this entry is in the first 8 items, i.e. you can reach it without pressing S:
-  * In the CATS options, set the "Refuelling mode" to "Personal (First 8 items)".
+  * In `settings.ini`, set `refuel-mode=0`
   * Count how many times you have to press W to get to that entry from the "Confirm Items Transfer" button.
-  * Enter this number in the "Tritium slot" option in CATS.
+  * Set `tritium_slot=` equal to that number.
 * If the entry is not in the first 8 items:
-    * In the CATS options, set the "Refuelling mode" to "Personal (After 8 items)".
+    * In `settings.ini`, set `refuel-mode=1`
     * Back out of the transfer menu, then go back into it.
     * Press W, then count how many times you have to press S to get to that entry.
-    * Enter this number in the "Tritium slot" option in CATS.
+    * Set `tritium_slot=` equal to that number.
 
 #### Using a SQUADRON carrier
-* In the CATS options, set the "Refuelling mode" to "Squadron".
+* In `settings.ini`, set `refuel-mode=2`
 * Fill the carrier's tritium depot to full (1000 tritium).
 * Use a ship with at least 200 cargo capacity.
 * Fill your ship's cargo hold with tritium.
 * Go to the squadron bank menu and select the Commodities section.
 * Hover over the top commodity in the list.
 * Count how many times you have to press S to get to the tritium you want to use (if it's at the top, this would be 0).
-* Enter this number in the "Tritium slot" option in CATS.
+* Set `tritium_slot=` equal to that number.
 
 ### Starting the route
 * Dock with your carrier.
 * Make sure your cursor is over the "Carrier Services" option, and that your internal panel (right) is on the home tab.
-* Update `TraversalSystem/settings.txt` with your journal directory, Discord webhook, tritium slot, and route file location.
-* Toggle behaviour in `TraversalSystem/settings.ini` (auto-plot, disable-refuel, power-saving, refuel-mode, and single-discord-message).
-* Put each system on a new line in `route.txt` (or any file referenced by `route_file` in `settings.txt`).
-* Run `python TraversalSystem/main.py`, then tab to the Elite Dangerous window. It should now start to plot jumps.
+* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles.
+* Put each system on a new line in `route.txt` (or any file referenced by `route_file` in `settings.ini`).
+* Run the packaged `TraversalSystem.exe` (or `python TraversalSystem/main.py` from source), then tab to the Elite Dangerous window. It should now start to plot jumps.
 
 ## Traversal system disclaimer
 Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.
 
-<br><br>
-o7

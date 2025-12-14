@@ -29,11 +29,11 @@ jobs:
       - name: Prepare release bundle
         shell: pwsh
         run: |
-          $distRoot = "TraversalSystem/pyinstaller"
+          $distRoot = "TraversalSystem/pyinstaller/TraversalSystem"
           $bundleDir = "release-bundle/TraversalSystem"
           New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
-          Copy-Item "$distRoot/TraversalSystem" -Destination $bundleDir -Recurse -Force
-          Copy-Item "TraversalSystem/photos.txt","TraversalSystem/res.csv","TraversalSystem/route.txt","TraversalSystem/settings.ini","TraversalSystem/settings.txt" -Destination $bundleDir -Force
+          Copy-Item "$distRoot/*" -Destination $bundleDir -Recurse -Force
+          Copy-Item "TraversalSystem/photos.txt","TraversalSystem/res.csv","TraversalSystem/route.txt","TraversalSystem/settings.ini" -Destination $bundleDir -Force
           Copy-Item "TraversalSystem/sequences" -Destination $bundleDir -Recurse -Force
 
       - name: Create zip archive
