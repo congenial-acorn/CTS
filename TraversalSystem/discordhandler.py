@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import random
 import re
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 from discord_webhook import DiscordWebhook, DiscordEmbed
+from config import BASE_DIR
 
 # Define default carrier stage list and maintenance stage list
 CSL = [
@@ -43,8 +45,9 @@ class DiscordHandler:
         if photos is not None:
             self.photo_list: List[str] = list(photos)
         else:
+            photos_path = BASE_DIR / "photos.txt"
             try:
-                with open("photos.txt", "r", encoding="utf-8") as photosFile:
+                with photos_path.open("r", encoding="utf-8") as photosFile:
                     self.photo_list = photosFile.read().split()
             except Exception as e:
                 print("Failed to get image URLs in photos.txt with error: ", e)

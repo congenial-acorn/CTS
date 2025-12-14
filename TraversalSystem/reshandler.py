@@ -1,5 +1,7 @@
 import math
 
+from config import BASE_DIR
+
 
 class Reshandler:
     __slots__ = ["sysNameX", "sysNameUpperY", "sysNameLowerY", "jumpButtonX", "jumpButtonY", "supported_res"]
@@ -8,7 +10,9 @@ class Reshandler:
         multiplier = 1
         line = ""
 
-        with open("res.csv", "r", encoding="utf-8") as file:
+        res_path = BASE_DIR / "res.csv"
+
+        with res_path.open("r", encoding="utf-8") as file:
             j = 0
             for l in file.readlines():
                 j += 1
@@ -30,7 +34,7 @@ class Reshandler:
 
             i = 0
 
-            with open("res.csv", "r", encoding="utf-8") as file:
+            with res_path.open("r", encoding="utf-8") as file:
                 for l in file.readlines():
                     i += 1
                     if i == 1:
