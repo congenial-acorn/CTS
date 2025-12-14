@@ -24,6 +24,12 @@ This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
 * **Release build (recommended):** Download the latest zip from GitHub Releases. Extract it and keep everything in the extracted `TraversalSystem` folder together (exe plus data files).
 * **From source:** Install Python + `requirements.txt`, then run `python TraversalSystem/main.py` or build with `build_TraversalSystem.sh`. 
 
+## Updating
+* **Release exe:** Download the .exe file from the release and replace the old one in your TraversalSystem folder. 
+  * This is the recomended option unless otherwise noted in the release notes. 
+* **Release zip:** Download the .zip file and copy your configuration files into the new TraversalSystem folder. 
+  * The second option is necessary if noted in the release notes.
+
 ## Necessary files
 Place/keep these files alongside the exe, whether running from release or from source:
 * `settings.ini`

@@ -12,6 +12,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Compute safe tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $safe = $tag -replace '\.', ''
+          "SAFE_TAG=$safe" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -24,12 +31,12 @@ jobs:
 
       - name: Build Traversal executable (onedir)
         run: |
-          pyinstaller TraversalSystem/main.py --onedir --name TraversalSystem --distpath TraversalSystem/pyinstaller --workpath TraversalSystem/pyinstaller/build --specpath TraversalSystem/pyinstaller --python-option u --noconfirm
+          pyinstaller TraversalSystem/main.py --onedir --name TraversalSystem_$Env:SAFE_TAG --distpath TraversalSystem/pyinstaller --workpath TraversalSystem/pyinstaller/build --specpath TraversalSystem/pyinstaller --python-option u --noconfirm
 
       - name: Prepare release bundle
         shell: pwsh
         run: |
-          $distRoot = "TraversalSystem/pyinstaller/TraversalSystem"
+          $distRoot = "TraversalSystem/pyinstaller/TraversalSystem_$Env:SAFE_TAG"
           $bundleDir = "release-bundle/TraversalSystem"
           New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
           Copy-Item "$distRoot/*" -Destination $bundleDir -Recurse -Force
@@ -41,11 +48,10 @@ jobs:
         id: zip
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $safeTag = $tag -replace '\.', ''
-          $zipName = "TraversalSystem_${safeTag}.zip"
+          $zipName = "TraversalSystem_$Env:SAFE_TAG.zip"
           Compress-Archive -Path "release-bundle/*" -DestinationPath $zipName -Force
           echo "zip_path=$zipName" >> $Env:GITHUB_OUTPUT
+          echo "exe_path=TraversalSystem/pyinstaller/TraversalSystem_$Env:SAFE_TAG/TraversalSystem_$Env:SAFE_TAG.exe" >> $Env:GITHUB_OUTPUT
 
       - name: Create GitHub release and upload asset
         env:
@@ -54,4 +60,6 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $zip = "${{ steps.zip.outputs.zip_path }}"
-          gh release create $tag $zip --title $tag --notes ""
+          $exe = "${{ steps.zip.outputs.exe_path }}"
+          $notes = "Use the zip for fresh installs. The standalone exe is for updates only (drop it over an existing install)."
+          gh release create $tag $zip $exe --title $tag --notes "$notes"
