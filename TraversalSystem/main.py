@@ -612,7 +612,7 @@ def run_traversal(options: TraversalOptions) -> bool:
         "o7",
     )
     if options.shutdown_on_complete:
-        os.system("shutdown /s /t 0")
+        os.system("shutdown /s /t 30")
     else:
         print("Shutdown on completion is disabled. Exiting without powering off.")
     return True
