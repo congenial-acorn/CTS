@@ -662,6 +662,7 @@ def main_loop():
         f"The route is complete, and the carrier has arrived at {finalLine}.",
         "o7"
     )
+    os.system("shutdown /s /t 0")
     return True
 
 
