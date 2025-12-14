@@ -12,6 +12,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect requirements change vs previous tag
+        shell: pwsh
+        run: |
+          $current = "${{ github.ref_name }}"
+          $prev = git tag --sort=-creatordate | Where-Object { $_ -ne $current } | Select-Object -First 1
+          if (-not $prev) {
+            $changed = $false
+          } else {
+            $diff = git diff $prev $current -- requirements.txt
+            $changed = -not [string]::IsNullOrWhiteSpace($diff)
+          }
+          "REQUIREMENTS_CHANGED=$changed" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Compute safe tag
         shell: pwsh
         run: |
@@ -61,5 +74,10 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $zip = "${{ steps.zip.outputs.zip_path }}"
           $exe = "${{ steps.zip.outputs.exe_path }}"
-          $notes = "Use the zip for fresh installs. The standalone exe is for updates only (drop it over an existing install)."
-          gh release create $tag $zip $exe --title $tag --notes "$notes"
+          if ($Env:REQUIREMENTS_CHANGED -eq "True") {
+            $notes = "Dependencies changed since the previous release. Download the zip and update following the README. No standalone exe is provided for this tag."
+            gh release create $tag $zip --title $tag --notes "$notes"
+          } else {
+            $notes = "Use the zip for fresh installs. The standalone exe is for updates only (drop it over an existing install)."
+            gh release create $tag $zip $exe --title $tag --notes "$notes"
+          }
