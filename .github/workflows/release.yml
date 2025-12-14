@@ -1,0 +1,57 @@
+name: Release Traversal System
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build Traversal executable (onedir)
+        run: |
+          pyinstaller TraversalSystem/main.py --onedir --name TraversalSystem --distpath TraversalSystem/pyinstaller --workpath TraversalSystem/pyinstaller/build --specpath TraversalSystem/pyinstaller --python-option u --noconfirm
+
+      - name: Prepare release bundle
+        shell: pwsh
+        run: |
+          $distRoot = "TraversalSystem/pyinstaller/TraversalSystem"
+          $bundleDir = "release-bundle/TraversalSystem"
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          Copy-Item "$distRoot/*" -Destination $bundleDir -Recurse -Force
+          Copy-Item "TraversalSystem/photos.txt","TraversalSystem/res.csv","TraversalSystem/route.txt","TraversalSystem/settings.ini" -Destination $bundleDir -Force
+          Copy-Item "TraversalSystem/sequences" -Destination $bundleDir -Recurse -Force
+          Copy-Item "README.md","LICENSE" -Destination $bundleDir -Force
+
+      - name: Create zip archive
+        id: zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $safeTag = $tag -replace '\.', ''
+          $zipName = "TraversalSystem_${safeTag}.zip"
+          Compress-Archive -Path "release-bundle/*" -DestinationPath $zipName -Force
+          echo "zip_path=$zipName" >> $Env:GITHUB_OUTPUT
+
+      - name: Create GitHub release and upload asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "${{ steps.zip.outputs.zip_path }}"
+          gh release create $tag $zip --title $tag --notes ""
