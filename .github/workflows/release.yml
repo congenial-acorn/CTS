@@ -40,7 +40,9 @@ jobs:
         id: zip
         shell: pwsh
         run: |
-          $zipName = "TraversalSystem_${{ github.ref_name }}.zip"
+          $tag = "${{ github.ref_name }}"
+          $safeTag = $tag -replace '\.', ''
+          $zipName = "TraversalSystem_${safeTag}.zip"
           Compress-Archive -Path "release-bundle/*" -DestinationPath $zipName -Force
           echo "zip_path=$zipName" >> $Env:GITHUB_OUTPUT
 
