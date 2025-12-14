@@ -1,4 +1,4 @@
-# CATS (Carrier Administration and Traversal System)
+# CTS (Carrier Traversal System)
 The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
 
 This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
@@ -89,3 +89,6 @@ Whichever option you choose, set `route_file` in `settings.ini` to the file name
 ## Traversal system disclaimer
 Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.
 
+## Legal
+
+The source code is released under the [MIT License](https://github.com/congenial-acorn/CATS/blob/main/LICENSE). Neither the tool or the developer is associated with or endorsed by Frontier Developments, Elite Dangerous, or any other member or tool of the Elite Dangerous community.
