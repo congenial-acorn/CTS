@@ -11,3 +11,6 @@
 
 # Built installer
 /setup/CATSSetup.exe
+
+.venv/
+TraversalSystem\__pycache__\
