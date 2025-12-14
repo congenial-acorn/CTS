@@ -8,6 +8,7 @@
 
 # VSCode stuff
 /.vscode
+/.idea
 
 # Built installer
 /setup/CATSSetup.exe
