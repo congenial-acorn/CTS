@@ -8,6 +8,13 @@
 
 # VSCode stuff
 /.vscode
+/.idea
 
 # Built installer
 /setup/CATSSetup.exe
+
+.venv/
+/TraversalSystem/__pycache__/
+/TraversalSystem/route.txt
+*.exe
+TraversalSystem/route.txt

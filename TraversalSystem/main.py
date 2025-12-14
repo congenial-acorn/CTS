@@ -1,260 +1,184 @@
-# Greetings commander!
-# If you're reading this, it means one of two things:
-#
-# - You're a user who just attempted to run CATS by double clicking main.py. I'd advise you to try reading the
-#   provided README file.
-#
-# - You're a developer who's about to find out just how shit this code is. Good luck attempting to even read this.
-#   The code quality can be attributed to the fact that this was intended to be a quick script and ended up not
-#   being that, so lots of things are hacky and held together with string and tape.
-#   It can also be attributed to the fact that I've only ever used Python for quick scripts so I've never been
-#   bothered to find out proper Python programming techniques. It's a scripting language in my mind, not
-#   object oriented. Sue me.
-#   Maybe I'll refactor and document it at some point. I wouldn't count on it. Do it yourself and open a PR
-#   if it bothers you.
-#   At least it used to be much worse. Take a look at some of the old commits if you like. We love thousand-line
-#   python files that could be much simpler, right?
+from __future__ import annotations
 
-print("Autopilot Script Online")
-
+import ctypes
+import datetime
 import os
-import time
-import pydirectinput
-import pyautogui
 import random
 import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, List, Tuple
+
+import psutil
+import pyautogui
+import pydirectinput
 import pyperclip
-import datetime
-import sys
-import ctypes
 import pytz
 import tzlocal
-import psutil
 
-from journalwatcher import JournalWatcher
+from config import BASE_DIR, TraversalOptions, load_settings
 from discordhandler import DiscordHandler
+from journalwatcher import JournalWatcher
 from reshandler import Reshandler
+
 
 user32 = ctypes.windll.user32
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
-# ----Options----
-# How many up presses to reach tritium in carrier hold:
-global tritium_slot
-tritium_slot = 0
-# Time to refill trit
-hold_time = 10
-
-global route_file
-route_file = ""
-
-global webhook_url
-webhook_url = ""
-
-global journal_directory
-journal_directory = ""
-
-global auto_plot_jumps
-auto_plot_jumps = True
-
-global disable_refuel
-disable_refuel = False
-
-global power_saving
-power_saving = False
-
-global refuel_mode
-refuel_mode = 0
-
 # Get the screen resolution
 screen_width, screen_height = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-
-print("Screen resolution: " + str(screen_width) + "x" + str(screen_height))
-
 pyautogui.FAILSAFE = False
 
-res_handler = Reshandler(screen_width, screen_height)
-journal_watcher = JournalWatcher()
-discord_messenger = DiscordHandler()
-
-def load_settings():
-    global tritium_slot
-    global webhook_url
-    global journal_directory
-    global route_file
-    global auto_plot_jumps
-    global disable_refuel
-    global power_saving
-    global refuel_mode
-    # AFAIK, it is impossible to launch the script without either settings file existing
-
-    # Get settings from settings.txt
-    with open("settings.txt", "r", encoding="utf-8") as settingsFile:
-        settings_lines = settingsFile.read().split('\n')
-
-    # Attempt to read settings from settings.txt
-    try:
-        for line in settings_lines:
-            if line.startswith("webhook_url="):
-                print(line)
-                webhook_url = line.split("=")[1]
-
-            if line.startswith("journal_directory="):
-                print(line)
-                journal_directory = os.path.expanduser(line.split("=")[1])
-                latest_journal()  # Check if the journal directory is valid
-
-            if line.startswith("tritium_slot="):
-                print(line)
-                tritium_slot = int(line.split("=")[1])
-
-            if line.startswith("route_file="):
-                print(line)
-                route_file = line.split("=")[1]
-    except Exception as e:
-        print(
-            "There seems to be a problem with your settings.txt file. Make sure of the following:\n"
-            "- Your tritium slot is a valid integer.\n"
-            "- The journal directory is a valid directory for your operating system, and contains the Elite Dangerous journal files."
-        )
-        print(e)
-        os._exit(1)
-    
-    # Get settings from settings.ini
-    with open("../settings/settings.ini", "r", encoding="utf-8") as configFile:
-        config_lines = configFile.read().split('\n')
-
-    # Attempt to read settings from settings.ini
-    try:
-        for line in config_lines:
-            if line.startswith("auto-plot-jumps="):
-                print(line)
-                auto_plot_jumps = line.split("=")[1].strip().lower() == "true"
-
-            if line.startswith("disable-refuel="):
-                print(line)
-                disable_refuel = line.split("=")[1].strip().lower() == "true"
-
-            if line.startswith("power-saving="):
-                print(line)
-                power_saving = line.split("=")[1].strip().lower() == "true"
-
-            if line.startswith("refuel-mode"):
-                print(line)
-                refuel_mode = int(line.split("=")[1].strip())
-    except Exception as e:
-        print("There seems to be a problem with your settings.ini file. Please confirm that your options are properly selected.")
-        print(e)
-        os._exit(1)
+SEQUENCE_DIR = BASE_DIR / "sequences"
+SAVE_PATH = BASE_DIR / "save.txt"
 
 
-def latest_journal():
-    global journal_directory
-    dir_name = journal_directory
-    # Get list of all files only in the given directory
-    list_of_files = filter(lambda x: os.path.isfile(os.path.join(dir_name, x)),
-                           os.listdir(dir_name))
-    # Sort list of files based on last modification time in ascending order
-    list_of_files = sorted(list_of_files,
-                           key=lambda x: os.path.getmtime(os.path.join(dir_name, x))
-                           )
-    list_of_files.reverse()
-
-    journalName = ""
-    i = 0
-    while not journalName.startswith("Journal"):
-        journalName = list_of_files[i]
-        i += 1
-
-    return journal_directory + journalName.strip()
+@dataclass(slots=True)
+class TraversalState:
+    line_no: int = 0
+    saved_resume: bool = False
+    latest_journal: Path | None = None
+    game_ready: bool = False
+    stop_journal: threading.Event = field(default_factory=threading.Event)
+    journal_thread: threading.Thread | None = None
 
 
-def slight_random_time(time):
-    return random.random() + time
+def slight_random_time(base: float) -> float:
+    return random.random() + base
 
 
-def follow_button_sequence(sequence_name):
-    sequence = open("sequences/" + sequence_name, "r", encoding="utf-8").read().split("\n")
+def load_route_list(route_file: Path) -> List[str]:
+    if route_file.name.startswith("fleet-carrier-") and route_file.suffix.lower() == ".csv":
+        return _load_carrier_csv(route_file)
 
-    for line in sequence:
-        if line.__contains__(":"):
-            pydirectinput.keyDown(line.split(":")[0])
-            time.sleep(slight_random_time(int(line.split(":")[1])))
-            pydirectinput.keyUp(line.split(":")[0])
+    content = route_file.read_text(encoding="utf-8").strip()
+    route = [line.strip() for line in content.splitlines() if line.strip()]
+    if not route:
+        raise ValueError("Route file is empty. Exiting...")
+    return route
+
+
+def _load_carrier_csv(route_file: Path) -> List[str]:
+    def extract_names(rows: Iterable[str]) -> List[str]:
+        systems: List[str] = []
+        for row in rows:
+            parts = row.split(",")
+            if not parts:
+                continue
+            name = parts[0].strip().strip('"')
+            if name and name.lower() != "system name":
+                systems.append(name)
+        return systems
+
+    lines = route_file.read_text(encoding="utf-8").splitlines()
+    route = extract_names(lines[1:])  # skip header if present
+    if not route:
+        raise ValueError("Route file is empty. Exiting...")
+    return route
+
+
+def latest_journal_path(journal_dir: Path) -> Path:
+    directory = journal_dir.expanduser()
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Journal directory not found: {directory}")
+
+    files = [
+        p
+        for p in directory.iterdir()
+        if p.is_file() and p.name.startswith("Journal")
+    ]
+    if not files:
+        raise FileNotFoundError(f"No journal files found in {directory}")
+
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
+    sequence_path = sequence_dir / sequence_name
+    if sequence_path.suffix == "":
+        sequence_path = sequence_path.with_suffix(".txt")
+
+    if not sequence_path.exists():
+        print(f"Sequence file missing: {sequence_path}")
+        return
+
+    for line in sequence_path.read_text(encoding="utf-8").splitlines():
+        if ":" in line:
+            key, duration = line.split(":", 1)
+            pydirectinput.keyDown(key)
+            time.sleep(slight_random_time(float(duration)))
+            pydirectinput.keyUp(key)
         else:
             wait_time = 0.1
             key = line
 
-            if line.__contains__("-"):
-                wait_time = int(line.split("-")[1])
-                key = line.split("-")[0]
+            if "-" in line:
+                key, wait_raw = line.split("-", 1)
+                wait_time = float(wait_raw)
 
             pydirectinput.press(key)
             time.sleep(slight_random_time(wait_time))
 
 
-def restock_tritium():
-    global refuel_mode
-
-    if not auto_plot_jumps or disable_refuel:
-        # If manual jumping is enabled or automatic refuel is disabled, skip function execution
+def restock_tritium(options: TraversalOptions, sequence_dir: Path) -> None:
+    if not options.auto_plot_jumps or options.disable_refuel:
         return
-    
+
     restock_order = ["restock_fc", "open_cargo_transfer", "restock_cargo"]
 
     for step in restock_order:
-        if refuel_mode == 2 and os.path.isfile(f"sequences/squadron/{step}.txt"):
-            follow_button_sequence(f"squadron/{step}.txt")  # follow the button sequence for each step
+        if options.refuel_mode == 2 and (sequence_dir / "squadron" / f"{step}.txt").exists():
+            follow_button_sequence(sequence_dir, f"squadron/{step}.txt")
         else:
-            follow_button_sequence(f"{step}.txt")
+            follow_button_sequence(sequence_dir, f"{step}.txt")
 
         if step == "open_cargo_transfer":
-            # at the end of the cargo transfer step, we need to select the correct trit slot based on user input
-            if refuel_mode == 1: # Bug fix mode
-                pydirectinput.press('w')
+            if options.refuel_mode == 1:
+                pydirectinput.press("w")
                 time.sleep(slight_random_time(0.1))
-            
-            for _ in range(tritium_slot):
-                if refuel_mode == 2 or refuel_mode == 1: # Squadron or bug fix mode
-                    pydirectinput.press('s')
-                else: # Regular personal mode
-                    pydirectinput.press('w')
-               
+
+            for _ in range(options.tritium_slot):
+                if options.refuel_mode in (1, 2):
+                    pydirectinput.press("s")
+                else:
+                    pydirectinput.press("w")
                 time.sleep(slight_random_time(0.1))
 
     print("Refuel process completed.")
 
 
-def jump_to_system(system_name):
-    global refuel_mode
-
-    if not auto_plot_jumps:
-        # Manual jumping
+def jump_to_system(
+    system_name: str,
+    options: TraversalOptions,
+    res_handler: Reshandler,
+    journal_watcher: JournalWatcher,
+    sequence_dir: Path,
+) -> Tuple[int, datetime.datetime]:
+    if not options.auto_plot_jumps:
         pyperclip.copy(system_name.lower())
-        print(
-            "alert:Please plot the jump to %s. It has been copied to your clipboard." % system_name)
+        print(f"alert:Please plot the jump to {system_name}. It has been copied to your clipboard.")
         while journal_watcher.last_carrier_request() != system_name:
             time.sleep(1)
 
         current_time = datetime.datetime.now(datetime.timezone.utc)
         departure_time_str = journal_watcher.departureTime
-        departure_time = datetime.datetime.strptime(departure_time_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.UTC)
-
-        print(current_time.strftime("%m-%d-%Y %H:%M:%S (UTC%z)"))
-        print(departure_time.strftime("%m-%d-%Y %H:%M:%S (UTC%z)"))
+        departure_time = datetime.datetime.strptime(
+            departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=pytz.UTC)
 
         delta = departure_time - current_time
 
         return int(delta.total_seconds()), departure_time
 
-    if refuel_mode == 2:
-        follow_button_sequence("squadron/jump_nav_1.txt")
+    if options.refuel_mode == 2:
+        follow_button_sequence(sequence_dir, "squadron/jump_nav_1.txt")
     else:
-        follow_button_sequence("jump_nav_1.txt")
+        follow_button_sequence(sequence_dir, "jump_nav_1.txt")
 
     pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press('space')
+    pydirectinput.press("space")
     pyperclip.copy(system_name.lower())
     time.sleep(slight_random_time(1.0))
     pydirectinput.keyDown("ctrl")
@@ -263,231 +187,261 @@ def jump_to_system(system_name):
     time.sleep(slight_random_time(0.1))
     pydirectinput.keyUp("ctrl")
     time.sleep(slight_random_time(3.0))
-    # pydirectinput.press('down')
     pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press('space')
+    pydirectinput.press("space")
     time.sleep(slight_random_time(0.1))
     pyautogui.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press('space')
+    pydirectinput.press("space")
 
     time.sleep(6)
 
     if journal_watcher.last_carrier_request() != system_name:
-        print(journal_watcher.lastCarrierRequest)
-        print(system_name)
         print("Jump appears to have failed.")
-        print("Re-attempting...")
-        follow_button_sequence("jump_fail.txt")
+        follow_button_sequence(sequence_dir, "jump_fail.txt")
         return 0, 0
 
     current_time = datetime.datetime.now(datetime.timezone.utc)
     departure_time_str = journal_watcher.departureTime
-    departure_time = datetime.datetime.strptime(departure_time_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.UTC)
-
-    print(current_time.strftime("%m-%d-%Y %H:%M:%S (UTC%z)"))
-    print(departure_time.strftime("%m-%d-%Y %H:%M:%S (UTC%z)"))
+    departure_time = datetime.datetime.strptime(
+        departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=pytz.UTC)
 
     delta = departure_time - current_time
 
-    # keeping this here, commented, as a tribute to the shit I had to deal with when I had to use OCR
-    # if not sys.argv[2] == "--default":
-    #     timeToJump = time_until_jump()
-    #     print(timeToJump.strip())
-    # else:
-    #     print("OCR disabled. Assuming usual time.")
-    #     timeToJump = "0:15:10"
-    #
-    # try:
-    #     # Check OCR gave a valid time
-    #     a = timeToJump.split(':')
-    #     testop = int(a[0]) + int(a[1]) + int(a[2])
-    # except:
-    #     print("OCR failed! Assuming usual time.")
-    #     timeToJump = "0:15:00"
-
-    pydirectinput.press('backspace')
+    pydirectinput.press("backspace")
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press('backspace')
+    pydirectinput.press("backspace")
 
     return int(delta.total_seconds()), departure_time
 
 
-global lineNo
+def save_progress(state: TraversalState) -> None:
+    SAVE_PATH.write_text(str(state.line_no), encoding="utf-8")
+    print("Progress saved...")
 
-global game_ready
-game_ready = False
 
-global latestJournal
-global stopJournalThread
-stopJournalThread = False
+def handle_critical_error(
+    message: str,
+    state: TraversalState,
+    options: TraversalOptions,
+    discord_messenger: DiscordHandler,
+    route_name: str,
+) -> None:
+    print(message)
+    discord_messenger.post_to_discord(
+        "Critical Error",
+        options.webhook_url,
+        route_name,
+        "An error has occurred with the Flight Computer.",
+        "It's possible the game has crashed, or servers were taken down.",
+        "Please wait for the carrier to resume navigation.",
+        "o7",
+    )
+    save_progress(state)
+    os._exit(2)
 
-def open_game():
-    global game_ready
-    global latestJournal
-    global stopJournalThread
+
+def start_journal_thread(
+    state: TraversalState,
+    journal_watcher: JournalWatcher,
+    journal_path: Path,
+    options: TraversalOptions,
+    discord_messenger: DiscordHandler,
+    route_name: str,
+) -> None:
+    state.stop_journal.clear()
+    state.latest_journal = journal_path
+
+    def runner():
+        while not state.stop_journal.is_set():
+            ok = journal_watcher.process_journal(journal_path)
+            if not ok:
+                handle_critical_error(
+                    "An error has occurred with the Flight Computer.",
+                    state,
+                    options,
+                    discord_messenger,
+                    route_name,
+                )
+                return
+            time.sleep(1)
+        print("Journal thread halted")
+
+    state.journal_thread = threading.Thread(target=runner, daemon=True)
+    state.journal_thread.start()
+
+
+def open_game(
+    state: TraversalState,
+    options: TraversalOptions,
+    res_handler: Reshandler,
+    journal_watcher: JournalWatcher,
+    discord_messenger: DiscordHandler,
+    route_name: str,
+) -> None:
     print("Re-opening game...")
 
-    # Launch
     os.startfile("steam://rungameid/359320")
     time.sleep(60)
 
-    # Wait for the game to load
-    j = latest_journal()
+    journal_path = latest_journal_path(options.journal_directory)
 
-    menu = False
-    while not menu:
-        f = open(j, "r", encoding="utf-8").read()
-        if "Fileheader" in f:
+    menu_loaded = False
+    while not menu_loaded:
+        content = journal_path.read_text(encoding="utf-8")
+        if "Fileheader" in content:
             print("Menu loaded")
-            menu = True
+            menu_loaded = True
         else:
             print("Menu not loaded...")
             time.sleep(10)
 
-    # Give it a bit to load properly
     time.sleep(10)
 
-    # Start the game in solo mode
     print("Starting game...")
     pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
     pyautogui.click()
-    follow_button_sequence("start_game.txt")
+    follow_button_sequence(SEQUENCE_DIR, "start_game.txt")
 
-    # Wait for the Location event
     loaded = False
     while not loaded:
-        f = open(j, "r", encoding="utf-8").read()
-        if "Location" in f:
+        content = journal_path.read_text(encoding="utf-8")
+        if "Location" in content:
             print("Game loaded")
             loaded = True
         else:
             print("Game not loaded...")
-            # Just in case it didn't connect yet
             pydirectinput.press("space")
             time.sleep(10)
 
-
     print("Switching to new journal...")
     journal_watcher.reset_all()
-    latestJournal = latest_journal()
+    new_journal = latest_journal_path(options.journal_directory)
 
-    stopJournalThread = False
-    threading.Thread(target=process_journal, args=(latestJournal,)).start()
+    state.stop_journal.clear()
+    start_journal_thread(
+        state,
+        journal_watcher,
+        new_journal,
+        options,
+        discord_messenger,
+        route_name,
+    )
 
-    game_ready = True
+    state.game_ready = True
 
 
-def main_loop():
-    global lineNo
-    global tritium_slot
-    global webhook_url
-    global journal_directory
-    global route_file
-    global power_saving
-    global game_ready
-    global latestJournal
-    global stopJournalThread
+def run_traversal(options: TraversalOptions) -> bool:
+    journal_watcher = JournalWatcher()
+    discord_messenger = DiscordHandler(single_message=options.single_discord_message)
+    res_handler = Reshandler(screen_width, screen_height)
 
-    load_settings()
+    if not res_handler.supported_res:
+        print("Resolution not supported, exiting...")
+        return False
+
+    state = TraversalState()
 
     time.sleep(5)
 
-    latestJournal = latest_journal()
+    try:
+        route_list = load_route_list(options.route_file)
+    except Exception as exc:
+        print(exc)
+        return False
 
-    th = threading.Thread(target=process_journal, args=(latestJournal,))
-    th.start()
+    route_name = f"Carrier Updates: Route to {route_list[-1]}"
+    print(f"Destination: {route_list[-1]}")
 
-    lineNo = 0
-    saved = False
-
-    if disable_refuel:
-        print("Tritium refuelling is disabled!")
-
-    if os.path.exists("save.txt"):
+    if SAVE_PATH.exists():
         print("Save file found. Setting up...")
-        lineNo = int((open("save.txt", "r", encoding="utf-8")).read())
-        os.remove("save.txt")
+        state.line_no = int(SAVE_PATH.read_text(encoding="utf-8"))
+        state.saved_resume = True
+        SAVE_PATH.unlink(missing_ok=True)
 
-        saved = True
+    try:
+        journal_path = latest_journal_path(options.journal_directory)
+    except Exception as exc:
+        print(exc)
+        return False
+    start_journal_thread(
+        state,
+        journal_watcher,
+        journal_path,
+        options,
+        discord_messenger,
+        route_name,
+    )
 
     for countdown in range(5, 0, -1):
         print(f"Beginning in {countdown}...")
         time.sleep(1)
 
-    # print("Stocking initial tritium...")
-    # restock_tritium()
-
-    with open(route_file, "r", encoding="utf-8") as routeFile:
-        route = routeFile.read()
-
-    # Split the route into a list of systems, stripping whitespace (incl newlines). Empty indexes are discarded
-    route_list = route.strip().split("\n")
-    if route_list == [""]:
-        print("Route file is empty. Exiting...")
-        os._exit(1)
-
-    jumpsLeft = len(route_list) + 1
-    finalLine = route_list[-1]  # last index in the route list
-
-    routeName = "Carrier Updates: Route to " + finalLine
-
-    print("Destination: " + finalLine)
-
-    a1 = route_list
-    a = []
+    jumps_left = len(route_list) + 1
+    final_line = route_list[-1]
 
     delta = datetime.timedelta()
-    currentTime = datetime.datetime.fromtimestamp(time.mktime(time.localtime()), tzlocal.get_localzone())
-    for i in a1:
-        if (not i == "") and (not i == "\n"):
-            a.append(i)
-        else:
+    current_time = datetime.datetime.fromtimestamp(
+        time.mktime(time.localtime()), tzlocal.get_localzone()
+    )
+
+    for idx, system in enumerate(route_list):
+        if idx < state.line_no:
             continue
-        if a1.index(i) < lineNo: continue
         delta = delta + datetime.timedelta(seconds=1320)
-    arrivalTime = currentTime + delta
-    arrivalTime_discord = f"<t:{arrivalTime.timestamp():.0f}:f> (<t:{arrivalTime.timestamp():.0f}:R>)"
 
-    doneFirst = False
-    for i in range(len(a)):
-        jumpsLeft -= 1
-        if i < lineNo: continue
+    arrival_time = current_time + delta
+    arrival_time_discord = (
+        f"<t:{arrival_time.timestamp():.0f}:f> (<t:{arrival_time.timestamp():.0f}:R>)"
+    )
 
-        line = a[i]
+    done_first = False
+    for idx, system in enumerate(route_list):
+        jumps_left -= 1
+        if idx < state.line_no:
+            continue
 
-        # win.activate()
         time.sleep(3)
 
-        print("Next stop: " + line)
+        print(f"Next stop: {system}")
         print("Beginning navigation.")
         print("Please do not change windows until navigation is complete.")
-
-        print("ETA: " + arrivalTime.strftime("%A, %I:%M%p (UTC%z)"))
+        print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
 
         try:
-            timeToJump, departing_time = jump_to_system(line)
+            time_to_jump, departing_time = jump_to_system(
+                system, options, res_handler, journal_watcher, SEQUENCE_DIR
+            )
 
-            while timeToJump == 0 or departing_time == 0:
-                timeToJump, departing_time = jump_to_system(line)
+            while time_to_jump == 0 or departing_time == 0:
+                time_to_jump, departing_time = jump_to_system(
+                    system, options, res_handler, journal_watcher, SEQUENCE_DIR
+                )
 
-            fTime = str(datetime.timedelta(seconds=timeToJump))
-            # https://hammertime.cyou/
-            # Time of departure (in seconds since the Epoch) with this format will result in a dynamic countdown in Discord
-            # Countdown will look like "in {time} minutes" or "{time} minutes ago". See the link for more details
-            fTime_discord = f"<t:{departing_time.timestamp():.0f}:R>"
+            formatted_time = str(datetime.timedelta(seconds=time_to_jump))
+            departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
 
-            print("Navigation complete. Jump occurs in " + fTime + ". Counting down...")
-            if power_saving:
+            print(f"Navigation complete. Jump occurs in {formatted_time}. Counting down...")
+            if options.power_saving:
                 print("Power saving mode is active. Closing game...")
-                stopJournalThread = True
-                follow_button_sequence("close_game.txt")
-                # Open the game again when the jump is complete
-                threading.Timer(timeToJump, open_game).start()
-                game_ready = False
+                state.stop_journal.set()
+                follow_button_sequence(SEQUENCE_DIR, "close_game.txt")
+                threading.Timer(
+                    time_to_jump,
+                    open_game,
+                    args=(
+                        state,
+                        options,
+                        res_handler,
+                        journal_watcher,
+                        discord_messenger,
+                        route_name,
+                    ),
+                ).start()
+                state.game_ready = False
                 print("Game open scheduled")
-                # Kill the launcher
                 for proc in psutil.process_iter():
                     if proc.name() == "EDLaunch.exe":
                         proc.kill()
@@ -495,83 +449,75 @@ def main_loop():
 
             journal_watcher.reset_jump()
 
-            totalTime = timeToJump - 6
+            total_time = time_to_jump - 6
 
-            if totalTime > 900:
-                arrivalTime = arrivalTime + datetime.timedelta(seconds=totalTime - 900)
-                print(arrivalTime.strftime("%A, %I:%M%p (UTC%z)"))
-                # Arrival time (in seconds since the Epoch) with this format will result in a dynamic timestamp + countdown in Discord
-                # Result will look like "{month} {day}, {year} {hour}:{minute} {AM/PM} (in {time} minutes)"
-                arrivalTime_discord = f"<t:{arrivalTime.timestamp():.0f}:f> (<t:{arrivalTime.timestamp():.0f}:R>)"
+            if total_time > 900:
+                arrival_time = arrival_time + datetime.timedelta(
+                    seconds=total_time - 900
+                )
+                arrival_time_discord = (
+                    f"<t:{arrival_time.timestamp():.0f}:f> "
+                    f"(<t:{arrival_time.timestamp():.0f}:R>)"
+                )
 
-            if doneFirst:
-                previous_system = a[i - 1]
+            if done_first:
+                previous_system = route_list[idx - 1]
                 discord_messenger.post_with_fields(
                     "Carrier Jump",
-                    webhook_url,
-                    routeName,
+                    options.webhook_url,
+                    route_name,
                     f"Jump to {previous_system} successful.",
-                    f"The carrier is now jumping to the {line} system.",
-                    f"Jumps remaining: {jumpsLeft}",
-                    f"Next jump: {fTime_discord}",
-                    f"Estimated time of route completion: {arrivalTime_discord}",
-                    "o7"
+                    f"The carrier is now jumping to the {system} system.",
+                    f"Jumps remaining: {jumps_left}",
+                    f"Next jump: {departure_time_discord}",
+                    f"Estimated time of route completion: {arrival_time_discord}",
+                    "o7",
                 )
                 time.sleep(2)
                 discord_messenger.update_fields(0, 0)
             else:
-                if not saved:
+                if not state.saved_resume:
                     discord_messenger.post_with_fields(
                         "Flight Begun",
-                        webhook_url,
-                        routeName,
+                        options.webhook_url,
+                        route_name,
                         "The Flight Computer has begun navigating the Carrier.",
                         "The Carrier's route is as follows:",
                         "\n".join(route_list),
-                        f"First jump: {fTime_discord}",
-                        f"Estimated time of route completion: {arrivalTime_discord}",
-                        "o7"
+                        f"First jump: {departure_time_discord}",
+                        f"Estimated time of route completion: {arrival_time_discord}",
+                        "o7",
                     )
                     time.sleep(2)
                     discord_messenger.update_fields(0, 0)
                 else:
                     discord_messenger.post_with_fields(
                         "Flight Resumed",
-                        webhook_url,
-                        routeName,
+                        options.webhook_url,
+                        route_name,
                         "The Flight Computer has resumed navigation.",
-                        f"First jump: {fTime_discord}",
-                        f"Estimated time of route completion: {arrivalTime_discord}",
-                        "o7"
+                        f"First jump: {departure_time_discord}",
+                        f"Estimated time of route completion: {arrival_time_discord}",
+                        "o7",
                     )
                     time.sleep(2)
                     discord_messenger.update_fields(0, 0)
 
-
-        except Exception as e:
-            print(e)
-            print("An error has occurred. Saving progress and aborting...")
-            discord_messenger.post_to_discord(
-                "Critical Error",
-                webhook_url,
-                "Carrier Updates: Autopilot Error",
+        except Exception as exc:
+            print(exc)
+            handle_critical_error(
                 "An error has occurred with the Flight Computer.",
-                "It's possible the game has crashed, or servers were taken down.",
-                "Please wait for the carrier to resume navigation.",
-                "o7"
+                state,
+                options,
+                discord_messenger,
+                route_name,
             )
-            print("Message sent...")
-            saveFile = open("save.txt", "w+", encoding="utf-8")
-            saveFile.write(str(lineNo))
-            saveFile.close()
-            print("Progress saved...")
-            return False
 
-        while totalTime > 0:
-            print(totalTime)
+        while total_time > 0:
+            print(total_time)
             time.sleep(1)
 
-            match totalTime:
+            match total_time:
                 case 600:
                     discord_messenger.update_fields(1, 1)
                 case 200:
@@ -591,51 +537,50 @@ def main_loop():
                 case 30:
                     discord_messenger.update_fields(4, 7)
 
-            totalTime -= 1
+            total_time -= 1
 
         print("Jumping!")
 
         discord_messenger.update_fields(5, 7)
 
-        lineNo += 1
+        state.line_no += 1
 
-        if line == finalLine and power_saving:
-            # When making the final jump on power saving mode, avoid reopening the game to do post-jump tasks
+        if system == final_line and options.power_saving:
             print("Counting down until jump finishes...")
 
-            totalTime = 60
-            while totalTime > 0:
-                print(totalTime)
+            total_time = 60
+            while total_time > 0:
+                print(total_time)
                 time.sleep(1)
-                totalTime -= 1
+                total_time -= 1
 
             discord_messenger.update_fields(9, 9)
         else:
             print("Counting down until next jump...")
-            totalTime = 362
-            while totalTime > 0:
-                print(totalTime)
+            total_time = 362
+            while total_time > 0:
+                print(total_time)
 
-                match totalTime:
+                match total_time:
                     case 340:
                         discord_messenger.update_fields(6, 7)
                     case 320:
                         discord_messenger.update_fields(7, 7)
                     case 300:
-                        if not power_saving:
+                        if not options.power_saving:
                             print("Pausing execution until jump is confirmed...")
-                            c = False
-                            while not c:
-                                c = journal_watcher.get_jumped()
-                                if not c:
+                            completed = False
+                            while not completed:
+                                completed = journal_watcher.get_jumped()
+                                if not completed:
                                     print("Jump not complete...")
                                     time.sleep(10)
                         else:
                             print("Pausing execution until game is open and ready...")
-                            while not game_ready:
+                            while not state.game_ready:
                                 print("Game not ready...")
                                 time.sleep(10)
-                            totalTime = 152
+                            total_time = 152
                         print("Jump complete!")
                         discord_messenger.update_fields(8, 7)
                     case 151:
@@ -645,59 +590,50 @@ def main_loop():
                     case 150:
                         print("Restocking tritium...")
                         time.sleep(2)
-                        th = threading.Thread(target=restock_tritium)
-                        th.start()
+                        threading.Thread(
+                            target=restock_tritium, args=(options, SEQUENCE_DIR), daemon=True
+                        ).start()
 
                 time.sleep(1)
-                totalTime -= 1
+                total_time -= 1
             discord_messenger.update_fields(9, 9)
 
-        doneFirst = True
+        done_first = True
 
     print("Route complete!")
     discord_messenger.post_to_discord(
         "Carrier Arrived",
-        webhook_url,
-        routeName,
-        f"The route is complete, and the carrier has arrived at {finalLine}.",
-        "o7"
+        options.webhook_url,
+        route_name,
+        f"The route is complete, and the carrier has arrived at {final_line}.",
+        "o7",
     )
-    os.system("shutdown /s /t 0")
+    if options.shutdown_on_complete:
+        os.system("shutdown /s /t 0")
+    else:
+        print("Shutdown on completion is disabled. Exiting without powering off.")
     return True
 
 
-def process_journal(file_name):
-    while not stopJournalThread:
-        c = journal_watcher.process_journal(file_name)
-        if not c:
-            print("An error has occurred. Saving progress and aborting...")
-            discord_messenger.post_to_discord(
-                "Critical Error",
-                webhook_url,
-                "Carrier Updates: Journal Error",
-                "An error has occurred with the Flight Computer.",
-                "It's possible the game has crashed, or servers were taken down.",
-                "Please wait for the carrier to resume navigation.",
-                "o7"
-            )
-            print("Message sent...")
-            saveFile = open("save.txt", "w+", encoding="utf-8")
-            saveFile.write(str(lineNo))
-            saveFile.close()
-            print("Progress saved...")
-            os._exit(2)
+def main() -> None:
+    print("Autopilot Script Online")
+    print(f"Screen resolution: {screen_width}x{screen_height}")
 
-        time.sleep(1)
-    print("Journal thread halted")
+    try:
+        options = load_settings()
+    except Exception as exc:
+        print(
+            "There seems to be a problem with your settings files. "
+            "Ensure settings.txt and settings.ini are present in the TraversalSystem directory."
+        )
+        print(exc)
+        os._exit(1)
 
+    if not run_traversal(options):
+        os._exit(1)
 
-if not res_handler.supported_res:
-    print("Resolution not supported, exiting...")
-    os._exit(1)
-else:
-    if not main_loop():
-        print("Aborted.")
-        os._exit(2)
-    # Use os._exit because Pyinstaller doesn't like sys.exit for some reason
-    # Exit code docs: 0 = success, 1 = small error (unsupported res, no route), 2 = critical error (journal error, main loop crash)
     os._exit(0)
+
+
+if __name__ == "__main__":
+    main()

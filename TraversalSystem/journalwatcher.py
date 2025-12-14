@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import json
+from pathlib import Path
 
 class JournalWatcher:
     __slots__ = ["firstRun", "lastJournalText", "lastCarrierRequest", "hasJumped", "departureTime", "lastFuel", "lastUsedFileName"]
@@ -17,20 +20,24 @@ class JournalWatcher:
 
 
     def process_journal(self, file_name) -> bool:
-        self.lastUsedFileName = file_name
+        self.lastUsedFileName = str(file_name)
 
-        # print("Hello from thread!")
+        journal_path = Path(file_name)
+        if not journal_path.exists():
+            print(f"Journal file not found: {journal_path}")
+            return False
 
-        journal = open(file_name, "r", encoding="utf-8")
-        journalText = journal.read()
-        journal.close()
+        with journal_path.open("r", encoding="utf-8") as journal:
+            journalText = journal.read()
 
         if journalText != self.lastJournalText and not self.firstRun:
             newText = journalText.replace(self.lastJournalText, "").strip()
 
             for line in newText.split("\n"):
-                event = json.loads(line)
-                # print(event)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
                 if event['event'] == "CarrierJumpRequest":
                     destination = event['SystemName']
