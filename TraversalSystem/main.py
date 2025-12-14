@@ -16,6 +16,7 @@ import pydirectinput
 import pyperclip
 import pytz
 import tzlocal
+import sys
 
 from config import BASE_DIR, TraversalOptions, load_settings
 from discordhandler import DiscordHandler
@@ -514,7 +515,7 @@ def run_traversal(options: TraversalOptions) -> bool:
             )
 
         while total_time > 0:
-            print(total_time)
+            print(f"Jump in {total_time:>4}s", end="\r", flush=True)
             time.sleep(1)
 
             match total_time:
@@ -538,6 +539,7 @@ def run_traversal(options: TraversalOptions) -> bool:
                     discord_messenger.update_fields(4, 7)
 
             total_time -= 1
+        print()
 
         print("Jumping!")
 
@@ -559,7 +561,7 @@ def run_traversal(options: TraversalOptions) -> bool:
             print("Counting down until next jump...")
             total_time = 362
             while total_time > 0:
-                print(total_time)
+                print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
                 match total_time:
                     case 340:
@@ -568,7 +570,7 @@ def run_traversal(options: TraversalOptions) -> bool:
                         discord_messenger.update_fields(7, 7)
                     case 300:
                         if not options.power_saving:
-                            print("Pausing execution until jump is confirmed...")
+                            print("\nPausing execution until jump is confirmed...")
                             completed = False
                             while not completed:
                                 completed = journal_watcher.get_jumped()
@@ -576,7 +578,7 @@ def run_traversal(options: TraversalOptions) -> bool:
                                     print("Jump not complete...")
                                     time.sleep(10)
                         else:
-                            print("Pausing execution until game is open and ready...")
+                            print("\nPausing execution until game is open and ready...")
                             while not state.game_ready:
                                 print("Game not ready...")
                                 time.sleep(10)
@@ -596,6 +598,7 @@ def run_traversal(options: TraversalOptions) -> bool:
 
                 time.sleep(1)
                 total_time -= 1
+            print()
             discord_messenger.update_fields(9, 9)
 
         done_first = True
