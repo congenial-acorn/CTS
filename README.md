@@ -52,7 +52,7 @@ Place/keep these files alongside the exe, whether running from release or from s
   * `refuel-mode=` 0 personal (first 8 items), 1 personal (after 8 items), 2 squadron
   * `single-discord-message=` true to edit one webhook message instead of posting new ones
   * `shutdown-on-complete=` true to power off when the route finishes
-* Your route file (whatever you set in `route_file`): See section [Refueling Setup](#refueling-setup) below.
+* Your route file (whatever you set in `route_file`): See section [Route Setup](#route-setup) below.
 
 ### Refueling Setup
 Read this section carefully and follow the instructions, as refuelling needs to have the options set correctly in order to function.
@@ -89,7 +89,8 @@ Whichever option you choose, set `route_file` in `settings.ini` to the file name
 ### Starting the route
 * Dock with your carrier.
 * Make sure your cursor is over the "Carrier Services" option, and that your internal panel (right) is on the home tab.
-* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles. Make sure you've set up your [refueling configuration](#refueling-setup) and [route configuration](#route-setup) properly.
+* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles.
+* Make sure you've set up your [refueling configuration](#refueling-setup) and [route configuration](#route-setup) properly.
 * Run the packaged `TraversalSystem.exe` (or `python TraversalSystem/main.py` from source), then tab to the Elite Dangerous window. It should now start to plot jumps.
 
 ## Traversal system disclaimer
