@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import random
 import re
+from typing import Iterable, List, Optional
+
 from discord_webhook import DiscordWebhook, DiscordEmbed
 
 # Define default carrier stage list and maintenance stage list
@@ -31,131 +35,46 @@ MSL = [
 class DiscordHandler:
     __slots__ = ["lastHook", "lastEmbed", "photo_list", "single_message"]
 
-    def __init__(self) -> None:
+    def __init__(self, *, single_message: bool = False, photos: Optional[Iterable[str]] = None) -> None:
         self.lastHook = None
-        self.single_message = False
-        try:
-            with open("photos.txt", "r", encoding="utf-8") as photosFile:
-                self.photo_list = photosFile.read().split()
-        except Exception as e:
-            print("Failed to get image URLs in photos.txt with error: ", e)
-            print("Using fallback URL...")
-            self.photo_list = ["https://upload.wikimedia.org/wikipedia/en/e/e5/Elite_Dangerous.png"]
-            
-        # Get settings from settings.ini
-        with open("../settings/settings.ini", "r", encoding="utf-8") as configFile:
-            config_lines = configFile.read().split('\n')
-    
-        # Attempt to read settings from settings.ini
-        try:
-            for line in config_lines:
-                if line.startswith("single-discord-message="):
-                    print(line)
-                    self.single_message = line.split("=")[1].strip().lower() == "true"
-    
-        except Exception as e:
-            print("There seems to be a problem with your settings.ini file. Please confirm that your options are properly selected.")
-            print(e)
-            os._exit(1)
+        self.lastEmbed = None
+        self.single_message = single_message
+
+        if photos is not None:
+            self.photo_list: List[str] = list(photos)
+        else:
+            try:
+                with open("photos.txt", "r", encoding="utf-8") as photosFile:
+                    self.photo_list = photosFile.read().split()
+            except Exception as e:
+                print("Failed to get image URLs in photos.txt with error: ", e)
+                print("Using fallback URL...")
+                self.photo_list = ["https://upload.wikimedia.org/wikipedia/en/e/e5/Elite_Dangerous.png"]
 
 
     def post_to_discord(self, subject: str, webhook_url: str, routeName: str, *message: str):
-        """Sends a message to a Discord webhook.
-        Args:
-            subject (str): The title of the embed message.
-            webhook_url (str): The URL of the Discord webhook.
-            routeName (str): The name of the route to be displayed as the author of the embed.
-            *message (str): The content to be included in the embed description. Each additional arg will be included as a new line.
-        """
+        """Send a simple message to a Discord webhook."""
         if webhook_url == "":
             return
         try:
             photo = random.choice(self.photo_list)
-
-            # If set to only send a single message, edit the last message (or send one if it's the first)
-            if self.single_message and self.lastHook is not None:
-                self.lastHook.remove_embeds()
-                
-                self.lastEmbed.title = subject
-                self.lastEmbed.description = "\n".join(message)
-                self.lastEmbed.set_image(url=photo)
-                self.lastEmbed.set_author(name=routeName)
-                self.lastEmbed.set_footer(text="Carrier Administration and Traversal System")
-                
-                self.lastEmbed.delete_embed_field(0)
-                self.lastEmbed.delete_embed_field(0)
-                
-                self.lastHook.add_embed(self.lastEmbed)
-                
-                self.lastHook.edit()
-            else:
-                webhook = DiscordWebhook(url=webhook_url, rate_limit_retry=True)
-    
-                embed = DiscordEmbed(title=subject, description="\n".join(message))
-                embed.set_image(url=photo)
-                embed.set_author(name=routeName)
-                embed.set_footer(text="Carrier Administration and Traversal System")
-    
-                self.lastEmbed = embed
-                webhook.add_embed(embed)
-    
-                webhook.execute()
-                self.lastHook = webhook
+            self._prepare_hook(webhook_url, subject, routeName, message, photo)
+            self._send_or_edit()
         except Exception as e:
             print("Discord webhook failed with error: ", e)
             print("Double-check that the webhook is set up")
 
 
     def post_with_fields(self, subject: str, webhook_url: str, routeName: str, *message: str):
-        """Sends a message to a Discord webhook with specified fields.
-        Args:
-            subject (str): The title of the embed message.
-            webhook_url (str): The URL of the Discord webhook.
-            routeName (str): The name of the route to be displayed as the author of the embed.
-            *message (str): The content to be included in the embed description. Each additional arg will be included as a new line.
-        """
+        """Send a message to a Discord webhook with status fields attached."""
         if webhook_url == "":
             return
         try:
             photo = random.choice(self.photo_list)
-            
-            # If set to only send a single message, edit the last message (or send one if it's the first)
-            if self.single_message and self.lastHook is not None:
-                self.lastHook.remove_embeds()
-                
-                self.lastEmbed.title = subject
-                self.lastEmbed.description = "\n".join(message)
-                self.lastEmbed.set_image(url=photo)
-                self.lastEmbed.set_author(name=routeName)
-                self.lastEmbed.set_footer(text="Carrier Administration and Traversal System")
-                
-                self.lastEmbed.delete_embed_field(0)
-                self.lastEmbed.delete_embed_field(0)
-                
-                self.lastEmbed.add_embed_field(name="Jump stage", value="Wait...")
-                self.lastEmbed.add_embed_field(name="Maintenance stage", value="Wait...")
-                
-                self.lastHook.add_embed(self.lastEmbed)
-                
-                self.lastHook.edit()
-            else:
-                webhook = DiscordWebhook(url=webhook_url, rate_limit_retry=True)
-            
-                embed = DiscordEmbed(title=subject, description="\n".join(message))
-                embed.set_image(url=photo)
-                embed.set_author(name=routeName)
-                
-                embed.set_footer(text="Carrier Administration and Traversal System")
-            
-                embed.add_embed_field(name="Jump stage", value="Wait...")
-                embed.add_embed_field(name="Maintenance stage", value="Wait...")
-            
-                self.lastEmbed = embed
-            
-                webhook.add_embed(embed)
-            
-                webhook.execute()
-                self.lastHook = webhook
+            self._prepare_hook(webhook_url, subject, routeName, message, photo)
+            self._reset_fields()
+            self._add_fields(("Jump stage", "Wait..."), ("Maintenance stage", "Wait..."))
+            self._send_or_edit()
         except Exception as e:
             print("Discord webhook failed with error: ", e)
             print("Double-check that the webhook is set up")
@@ -189,18 +108,65 @@ class DiscordHandler:
                     self.lastEmbed.description = str(re.sub(r"<t:\d*:R>", "Countdown Expired", self.lastEmbed.description))
         
         
-            self.lastHook.remove_embeds()
-        
-            self.lastEmbed.delete_embed_field(0)
-            self.lastEmbed.delete_embed_field(0)
-        
-            self.lastEmbed.add_embed_field(name="Jump stage", value="\n".join(cur_CSL))
-            self.lastEmbed.add_embed_field(name="Maintenance stage", value="\n".join(cur_MSL))
-        
-            self.lastHook.add_embed(self.lastEmbed)
-
+            self._reset_fields()
+            self._add_fields(
+                ("Jump stage", "\n".join(cur_CSL)),
+                ("Maintenance stage", "\n".join(cur_MSL)),
+            )
             self.lastHook.edit()
         except Exception as e:
             print("Discord webhook failed with error: ", e)
             print("Double-check that the webhook is set up")
             # print(f"DEBUG DATA: lastHook: {self.lastHook}, lastEmbed: {self.lastEmbed}")
+
+    def _prepare_hook(
+        self,
+        webhook_url: str,
+        subject: str,
+        route_name: str,
+        message: tuple[str, ...],
+        photo: str,
+    ) -> None:
+        if self.single_message and self.lastHook is not None and self.lastEmbed is not None:
+            self.lastHook.remove_embeds()
+            embed = self.lastEmbed
+            embed.title = subject
+            embed.description = "\n".join(message)
+        else:
+            self.lastHook = DiscordWebhook(url=webhook_url, rate_limit_retry=True)
+            embed = DiscordEmbed(title=subject, description="\n".join(message))
+            self.lastEmbed = embed
+
+        embed.set_image(url=photo)
+        embed.set_author(name=route_name)
+        embed.set_footer(text="Carrier Administration and Traversal System")
+
+    def _reset_fields(self) -> None:
+        if not self.lastHook or not self.lastEmbed:
+            return
+
+        self.lastHook.remove_embeds()
+        try:
+            self.lastEmbed.delete_embed_field(0)
+            self.lastEmbed.delete_embed_field(0)
+        except Exception:
+            pass
+
+    def _add_fields(self, *fields: tuple[str, str]) -> None:
+        if not self.lastEmbed:
+            return
+
+        for name, value in fields:
+            self.lastEmbed.add_embed_field(name=name, value=value)
+
+        if self.lastHook:
+            self.lastHook.add_embed(self.lastEmbed)
+
+    def _send_or_edit(self) -> None:
+        if not self.lastHook:
+            return
+
+        if self.single_message and self.lastHook is not None and self.lastEmbed is not None:
+            self.lastHook.edit()
+        else:
+            self.lastHook.execute()

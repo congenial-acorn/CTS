@@ -1,36 +1,27 @@
 # CATS (Carrier Administration and Traversal System)
-CATS is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
-<br>
-This app also allows you to view stats about carriers across multiple accounts.
+The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
+Everything in this repo now targets that single purpose.
 
-## Features
-### Admin interface
-* View name, callsign, credits, fuel, current system and other stats for multiple carriers.
-* Manage as many of your own personal carriers as you want.
-* View cargo and market data for your carriers.
-* Get carrier data from Frontier's API.
-### Traversal system
-* Automatic jump plotting
-* Supports all personal and squadron carriers, including Drake-, Fortune-, Victory-, Nautilus-, and Javelin-class carriers
-* Tritium restocking
-* Route time estimations
-* GUI
-* Keeps track of jump time (in case a jump is longer than 15 minutes)
-* Discord integration
-* Import routes from the Spansh fleet carrier router
-* Generate routes between two systems automatically using Spansh's API
-* Checks if you have enough Tritium for the route (personal carriers only)
+## Traversal features
+* Automatic jump plotting (or manual prompts if you prefer)
+* Supports personal and squadron carriers, including Drake-, Fortune-, Victory-, Nautilus-, and Javelin-class carriers
+* Tritium restocking workflows for personal and squadron refuel modes
+* Route time estimation and Discord webhook updates
+* Simple GUI-free workflow that drives the Elite interface directly
+* Imports routes from plain text; timings stay accurate even when jumps take longer than expected
 
 ## Limitations
 * This only works on Windows and probably won't be ported to anything else.
-* It also only works with PC accounts running on Odyssey (The admin interface also works with Live Horizons, but the traversal system is Odyssey-only for now)
+* Odyssey is required; Horizons is not supported.
 * The autopilot has experimental support for displays running at resolutions other than 1920x1080, though most resolutions haven't been tested.
 * Elite Dangerous should be running on your primary monitor in fullscreen.
 * Officially supported resolutions can be found in the `resolutions.md` file.
 * Elite needs to be using the default keybinds - if you've got custom keybinds, or are using a controller or HOTAS, you should back up your binds then reset to default keyboard+mouse.
 
 ## Installation
-The release comes bundled with everything you need to use both the admin panel and the traversal system. Just run the installer and you're good to go.
+* Install Python and the dependencies in `requirements.txt`.
+* Configure `TraversalSystem/settings.txt` and `TraversalSystem/settings.ini` (see the comments in those files).
+* Run `TraversalSystem/main.py` directly or package it with `build_TraversalSystem.sh` (PyInstaller).
 
 ## Traversal system usage
 ### Refuelling setup
@@ -67,19 +58,13 @@ Read this section carefully and follow the instructions, as refuelling needs to 
 ### Starting the route
 * Dock with your carrier.
 * Make sure your cursor is over the "Carrier Services" option, and that your internal panel (right) is on the home tab.
-* Open the traversal system. Fill in the options:
-  * Journal Dir: The directory of your Elite Dangerous journal files.
-  * Route: Put each system on a new line. Alternatively, import from a plain text list of systems, or a CSV from Spansh's FC plotter.
-* Check the options menu:
-  * Automatically plot jumps: If unchecked, you'll instead receive a pop-up telling you to plot a jump when it's time.
-  * Determine Tritium requirements when automatically findng route: Requires a carrier to be added to the admin interface.
-  * Power saving mode: EXPERIMENTAL. Will close and re-open the game between jumps. Requires the Steam version of Elite Dangerous.
-* Select the starting point: If you're already at a system on the route, select it here. Otherwise select "Before first system in route".
-* Click "Run CATS", then tab to the Elite Dangerous window. It should now start to plot jumps.
+* Update `TraversalSystem/settings.txt` with your journal directory, Discord webhook, tritium slot, and route file location.
+* Toggle behaviour in `TraversalSystem/settings.ini` (auto-plot, disable-refuel, power-saving, refuel-mode, and single-discord-message).
+* Put each system on a new line in `route.txt` (or any file referenced by `route_file` in `settings.txt`).
+* Run `python TraversalSystem/main.py`, then tab to the Elite Dangerous window. It should now start to plot jumps.
 
 ## Traversal system disclaimer
-Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.<br>
-Use of the admin interface without the traversal system carries no risk, as it's simply reading from FDev's API.
+Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account.
 
 <br><br>
 o7
