@@ -53,6 +53,7 @@ class TraversalOptions:
     power_saving: bool = False
     refuel_mode: int = 0
     single_discord_message: bool = False
+    shutdown_on_complete: bool = True
 
 
 def load_settings(
@@ -89,5 +90,8 @@ def load_settings(
         refuel_mode=_as_int(options_values.get("refuel-mode"), default=0),
         single_discord_message=_as_bool(
             options_values.get("single-discord-message"), default=False
+        ),
+        shutdown_on_complete=_as_bool(
+            options_values.get("shutdown-on-complete"), default=True
         ),
     )

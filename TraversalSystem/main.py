@@ -586,7 +586,10 @@ def run_traversal(options: TraversalOptions) -> bool:
         f"The route is complete, and the carrier has arrived at {final_line}.",
         "o7",
     )
-    os.system("shutdown /s /t 0")
+    if options.shutdown_on_complete:
+        os.system("shutdown /s /t 0")
+    else:
+        print("Shutdown on completion is disabled. Exiting without powering off.")
     return True
 
 
