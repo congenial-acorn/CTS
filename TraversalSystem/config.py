@@ -55,7 +55,8 @@ class TraversalOptions:
     webhook_url: str
     journal_directory: Path
     route_file: Path
-    tritium_slot: int
+    route_position: int = 0
+    tritium_slot: int = 0
     auto_plot_jumps: bool = True
     disable_refuel: bool = False
     power_saving: bool = False
@@ -87,6 +88,9 @@ def load_settings(
         webhook_url=settings_values.get("webhook_url", ""),
         journal_directory=journal_directory,
         route_file=route_file,
+        route_position=max(
+            0, _as_int(settings_values.get("route_position"), default=0)
+        ),
         tritium_slot=_as_int(settings_values.get("tritium_slot"), default=0),
         auto_plot_jumps=_as_bool(settings_values.get("auto-plot-jumps"), default=True),
         disable_refuel=_as_bool(settings_values.get("disable-refuel"), default=False),
