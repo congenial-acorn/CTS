@@ -643,6 +643,15 @@ def run_traversal(options: TraversalOptions) -> bool:
             "o7",
         )
         if options.shutdown_on_complete:
+            discord_messenger.post_to_discord(
+            "Carrier Arrived",
+            options.webhook_url,
+            route_name,
+            f"Shutting down computer.",
+            "o7",
+        )
+            print("Shutting down system in 30 seconds...")
+            time.sleep(5)
             os.system("shutdown /s /t 30")
         else:
             print("Shutdown on completion is disabled. Exiting without powering off.")
