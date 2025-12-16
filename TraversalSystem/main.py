@@ -43,6 +43,7 @@ class TraversalState:
     game_ready: bool = False
     stop_journal: threading.Event = field(default_factory=threading.Event)
     journal_thread: threading.Thread | None = None
+    route_complete: bool = False
 
 
 def slight_random_time(base: float) -> float:
@@ -343,279 +344,315 @@ def run_traversal(options: TraversalOptions) -> bool:
         print("Resolution not supported, exiting...")
         return False
 
-    state = TraversalState()
+    state = TraversalState(
+        line_no=options.route_position,
+        saved_resume=options.route_position > 0,
+    )
+    route_length = 0
+    progress_saved = False
+
+    def maybe_save_progress() -> None:
+        nonlocal progress_saved
+        if progress_saved:
+            return
+        if state.route_complete or route_length == 0:
+            return
+        if state.line_no >= route_length:
+            return
+        save_progress(state)
+        progress_saved = True
 
     time.sleep(5)
 
     try:
-        route_list = load_route_list(options.route_file)
-    except Exception as exc:
-        print(exc)
-        return False
+        try:
+            route_list = load_route_list(options.route_file)
+        except Exception as exc:
+            print(exc)
+            return False
+        route_length = len(route_list)
 
-    route_name = f"Carrier Updates: Route to {route_list[-1]}"
-    print(f"Destination: {route_list[-1]}")
+        route_name = f"Carrier Updates: Route to {route_list[-1]}"
+        print(f"Destination: {route_list[-1]}")
 
-    if SAVE_PATH.exists():
-        print("Save file found. Setting up...")
-        state.line_no = int(SAVE_PATH.read_text(encoding="utf-8"))
-        state.saved_resume = True
-        SAVE_PATH.unlink(missing_ok=True)
+        if SAVE_PATH.exists():
+            print("Save file found. Setting up...")
+            state.line_no = int(SAVE_PATH.read_text(encoding="utf-8"))
+            state.saved_resume = True
+            SAVE_PATH.unlink(missing_ok=True)
 
-    try:
-        journal_path = latest_journal_path(options.journal_directory)
-    except Exception as exc:
-        print(exc)
-        return False
-    start_journal_thread(
-        state,
-        journal_watcher,
-        journal_path,
-        options,
-        discord_messenger,
-        route_name,
-    )
-
-    for countdown in range(5, 0, -1):
-        print(f"Beginning in {countdown}...")
-        time.sleep(1)
-
-    jumps_left = len(route_list) + 1
-    final_line = route_list[-1]
-
-    delta = datetime.timedelta()
-    current_time = datetime.datetime.fromtimestamp(
-        time.mktime(time.localtime()), tzlocal.get_localzone()
-    )
-
-    for idx, system in enumerate(route_list):
-        if idx < state.line_no:
-            continue
-        delta = delta + datetime.timedelta(seconds=1320)
-
-    arrival_time = current_time + delta
-    arrival_time_discord = (
-        f"<t:{arrival_time.timestamp():.0f}:f> (<t:{arrival_time.timestamp():.0f}:R>)"
-    )
-
-    done_first = False
-    for idx, system in enumerate(route_list):
-        jumps_left -= 1
-        if idx < state.line_no:
-            continue
-
-        time.sleep(3)
-
-        print(f"Next stop: {system}")
-        print("Beginning navigation.")
-        print("Please do not change windows until navigation is complete.")
-        print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
+        if state.line_no > len(route_list):
+            print(
+                "Configured starting position exceeds the route length. "
+                "Starting at the end of the route."
+            )
+            state.line_no = len(route_list)
 
         try:
-            time_to_jump, departing_time = jump_to_system(
-                system, options, res_handler, journal_watcher, SEQUENCE_DIR
-            )
+            journal_path = latest_journal_path(options.journal_directory)
+        except Exception as exc:
+            print(exc)
+            return False
+        start_journal_thread(
+            state,
+            journal_watcher,
+            journal_path,
+            options,
+            discord_messenger,
+            route_name,
+        )
 
-            while time_to_jump == 0 or departing_time == 0:
+        for countdown in range(5, 0, -1):
+            print(f"Beginning in {countdown}...")
+            time.sleep(1)
+
+        jumps_left = len(route_list) + 1
+        final_line = route_list[-1]
+
+        delta = datetime.timedelta()
+        current_time = datetime.datetime.fromtimestamp(
+            time.mktime(time.localtime()), tzlocal.get_localzone()
+        )
+
+        for idx, system in enumerate(route_list):
+            if idx < state.line_no:
+                continue
+            delta = delta + datetime.timedelta(seconds=1320)
+
+        arrival_time = current_time + delta
+        arrival_time_discord = (
+            f"<t:{arrival_time.timestamp():.0f}:f> (<t:{arrival_time.timestamp():.0f}:R>)"
+        )
+
+        done_first = False
+        for idx, system in enumerate(route_list):
+            jumps_left -= 1
+            if idx < state.line_no:
+                continue
+
+            time.sleep(3)
+
+            print(f"Next stop: {system}")
+            print("Beginning navigation.")
+            print("Please do not change windows until navigation is complete.")
+            print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
+
+            try:
                 time_to_jump, departing_time = jump_to_system(
                     system, options, res_handler, journal_watcher, SEQUENCE_DIR
                 )
 
-            formatted_time = str(datetime.timedelta(seconds=time_to_jump))
-            departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
+                while time_to_jump == 0 or departing_time == 0:
+                    time_to_jump, departing_time = jump_to_system(
+                        system, options, res_handler, journal_watcher, SEQUENCE_DIR
+                    )
 
-            print(f"Navigation complete. Jump occurs in {formatted_time}. Counting down...")
-            if options.power_saving:
-                print("Power saving mode is active. Closing game...")
-                state.stop_journal.set()
-                follow_button_sequence(SEQUENCE_DIR, "close_game.txt")
-                threading.Timer(
-                    time_to_jump,
-                    open_game,
-                    args=(
-                        state,
-                        options,
-                        res_handler,
-                        journal_watcher,
-                        discord_messenger,
-                        route_name,
-                    ),
-                ).start()
-                state.game_ready = False
-                print("Game open scheduled")
-                for proc in psutil.process_iter():
-                    if proc.name() == "EDLaunch.exe":
-                        proc.kill()
-                print("Launcher killed")
+                formatted_time = str(datetime.timedelta(seconds=time_to_jump))
+                departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
 
-            journal_watcher.reset_jump()
-
-            total_time = time_to_jump - 6
-
-            if total_time > 900:
-                arrival_time = arrival_time + datetime.timedelta(
-                    seconds=total_time - 900
+                print(
+                    f"Navigation complete. Jump occurs in {formatted_time}. Counting down..."
                 )
-                arrival_time_discord = (
-                    f"<t:{arrival_time.timestamp():.0f}:f> "
-                    f"(<t:{arrival_time.timestamp():.0f}:R>)"
-                )
+                if options.power_saving:
+                    print("Power saving mode is active. Closing game...")
+                    state.stop_journal.set()
+                    follow_button_sequence(SEQUENCE_DIR, "close_game.txt")
+                    threading.Timer(
+                        time_to_jump,
+                        open_game,
+                        args=(
+                            state,
+                            options,
+                            res_handler,
+                            journal_watcher,
+                            discord_messenger,
+                            route_name,
+                        ),
+                    ).start()
+                    state.game_ready = False
+                    print("Game open scheduled")
+                    for proc in psutil.process_iter():
+                        if proc.name() == "EDLaunch.exe":
+                            proc.kill()
+                    print("Launcher killed")
 
-            if done_first:
-                previous_system = route_list[idx - 1]
-                discord_messenger.post_with_fields(
-                    "Carrier Jump",
-                    options.webhook_url,
-                    route_name,
-                    f"Jump to {previous_system} successful.",
-                    f"The carrier is now jumping to the {system} system.",
-                    f"Jumps remaining: {jumps_left}",
-                    f"Next jump: {departure_time_discord}",
-                    f"Estimated time of route completion: {arrival_time_discord}",
-                    "o7",
-                )
-                time.sleep(2)
-                discord_messenger.update_fields(0, 0)
-            else:
-                if not state.saved_resume:
+                journal_watcher.reset_jump()
+
+                total_time = time_to_jump - 6
+
+                if total_time > 900:
+                    arrival_time = arrival_time + datetime.timedelta(
+                        seconds=total_time - 900
+                    )
+                    arrival_time_discord = (
+                        f"<t:{arrival_time.timestamp():.0f}:f> "
+                        f"(<t:{arrival_time.timestamp():.0f}:R>)"
+                    )
+
+                if done_first:
+                    previous_system = route_list[idx - 1]
                     discord_messenger.post_with_fields(
-                        "Flight Begun",
+                        "Carrier Jump",
                         options.webhook_url,
                         route_name,
-                        "The Flight Computer has begun navigating the Carrier.",
-                        "The Carrier's route is as follows:",
-                        "\n".join(route_list),
-                        f"First jump: {departure_time_discord}",
+                        f"Jump to {previous_system} successful.",
+                        f"The carrier is now jumping to the {system} system.",
+                        f"Jumps remaining: {jumps_left}",
+                        f"Next jump: {departure_time_discord}",
                         f"Estimated time of route completion: {arrival_time_discord}",
                         "o7",
                     )
                     time.sleep(2)
                     discord_messenger.update_fields(0, 0)
                 else:
-                    discord_messenger.post_with_fields(
-                        "Flight Resumed",
-                        options.webhook_url,
-                        route_name,
-                        "The Flight Computer has resumed navigation.",
-                        f"First jump: {departure_time_discord}",
-                        f"Estimated time of route completion: {arrival_time_discord}",
-                        "o7",
-                    )
-                    time.sleep(2)
-                    discord_messenger.update_fields(0, 0)
+                    if not state.saved_resume:
+                        discord_messenger.post_with_fields(
+                            "Flight Begun",
+                            options.webhook_url,
+                            route_name,
+                            "The Flight Computer has begun navigating the Carrier.",
+                            "The Carrier's route is as follows:",
+                            "\n".join(route_list),
+                            f"First jump: {departure_time_discord}",
+                            f"Estimated time of route completion: {arrival_time_discord}",
+                            "o7",
+                        )
+                        time.sleep(2)
+                        discord_messenger.update_fields(0, 0)
+                    else:
+                        discord_messenger.post_with_fields(
+                            "Flight Resumed",
+                            options.webhook_url,
+                            route_name,
+                            "The Flight Computer has resumed navigation.",
+                            f"First jump: {departure_time_discord}",
+                            f"Estimated time of route completion: {arrival_time_discord}",
+                            "o7",
+                        )
+                        time.sleep(2)
+                        discord_messenger.update_fields(0, 0)
 
-        except Exception as exc:
-            print(exc)
-            handle_critical_error(
-                "An error has occurred with the Flight Computer.",
-                state,
-                options,
-                discord_messenger,
-                route_name,
-            )
+            except Exception as exc:
+                print(exc)
+                handle_critical_error(
+                    "An error has occurred with the Flight Computer.",
+                    state,
+                    options,
+                    discord_messenger,
+                    route_name,
+                )
 
-        while total_time > 0:
-            print(f"Jump in {total_time:>4}s", end="\r", flush=True)
-            time.sleep(1)
-
-            match total_time:
-                case 600:
-                    discord_messenger.update_fields(1, 1)
-                case 200:
-                    discord_messenger.update_fields(2, 2)
-                case 190:
-                    discord_messenger.update_fields(2, 3)
-                case 144:
-                    discord_messenger.update_fields(2, 4)
-                case 103:
-                    discord_messenger.update_fields(2, 5)
-                case 90:
-                    discord_messenger.update_fields(2, 6)
-                case 75:
-                    discord_messenger.update_fields(2, 7)
-                case 60:
-                    discord_messenger.update_fields(3, 7)
-                case 30:
-                    discord_messenger.update_fields(4, 7)
-
-            total_time -= 1
-        print()
-
-        print("Jumping!")
-
-        discord_messenger.update_fields(5, 7)
-
-        state.line_no += 1
-
-        if system == final_line and options.power_saving:
-            print("Counting down until jump finishes...")
-
-            total_time = 60
             while total_time > 0:
-                print(total_time)
+                print(f"Jump in {total_time:>4}s", end="\r", flush=True)
                 time.sleep(1)
-                total_time -= 1
-
-            discord_messenger.update_fields(9, 9)
-        else:
-            print("Counting down until next jump...")
-            total_time = 362
-            while total_time > 0:
-                print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
                 match total_time:
-                    case 340:
-                        discord_messenger.update_fields(6, 7)
-                    case 320:
-                        discord_messenger.update_fields(7, 7)
-                    case 300:
-                        if not options.power_saving:
-                            print("\nPausing execution until jump is confirmed...")
-                            completed = False
-                            while not completed:
-                                completed = journal_watcher.get_jumped()
-                                if not completed:
-                                    print("Jump not complete...")
-                                    time.sleep(10)
-                        else:
-                            print("\nPausing execution until game is open and ready...")
-                            while not state.game_ready:
-                                print("Game not ready...")
-                                time.sleep(10)
-                            total_time = 152
-                        print("Jump complete!")
-                        discord_messenger.update_fields(8, 7)
-                    case 151:
-                        discord_messenger.update_fields(8, 8)
-                    case 100:
-                        discord_messenger.update_fields(8, 9)
-                    case 150:
-                        print("Restocking tritium...")
-                        time.sleep(2)
-                        threading.Thread(
-                            target=restock_tritium, args=(options, SEQUENCE_DIR), daemon=True
-                        ).start()
+                    case 600:
+                        discord_messenger.update_fields(1, 1)
+                    case 200:
+                        discord_messenger.update_fields(2, 2)
+                    case 190:
+                        discord_messenger.update_fields(2, 3)
+                    case 144:
+                        discord_messenger.update_fields(2, 4)
+                    case 103:
+                        discord_messenger.update_fields(2, 5)
+                    case 90:
+                        discord_messenger.update_fields(2, 6)
+                    case 75:
+                        discord_messenger.update_fields(2, 7)
+                    case 60:
+                        discord_messenger.update_fields(3, 7)
+                    case 30:
+                        discord_messenger.update_fields(4, 7)
 
-                time.sleep(1)
                 total_time -= 1
             print()
-            discord_messenger.update_fields(9, 9)
 
-        done_first = True
+            print("Jumping!")
 
-    print("Route complete!")
-    discord_messenger.post_to_discord(
-        "Carrier Arrived",
-        options.webhook_url,
-        route_name,
-        f"The route is complete, and the carrier has arrived at {final_line}.",
-        "o7",
-    )
-    if options.shutdown_on_complete:
-        os.system("shutdown /s /t 30")
-    else:
-        print("Shutdown on completion is disabled. Exiting without powering off.")
-    return True
+            discord_messenger.update_fields(5, 7)
+
+            state.line_no += 1
+
+            if system == final_line and options.power_saving:
+                print("Counting down until jump finishes...")
+
+                total_time = 60
+                while total_time > 0:
+                    print(total_time)
+                    time.sleep(1)
+                    total_time -= 1
+
+                discord_messenger.update_fields(9, 9)
+            else:
+                print("Counting down until next jump...")
+                total_time = 362
+                while total_time > 0:
+                    print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
+
+                    match total_time:
+                        case 340:
+                            discord_messenger.update_fields(6, 7)
+                        case 320:
+                            discord_messenger.update_fields(7, 7)
+                        case 300:
+                            if not options.power_saving:
+                                print("\nPausing execution until jump is confirmed...")
+                                completed = False
+                                while not completed:
+                                    completed = journal_watcher.get_jumped()
+                                    if not completed:
+                                        print("Jump not complete...")
+                                        time.sleep(10)
+                            else:
+                                print("\nPausing execution until game is open and ready...")
+                                while not state.game_ready:
+                                    print("Game not ready...")
+                                    time.sleep(10)
+                                total_time = 152
+                            print("Jump complete!")
+                            discord_messenger.update_fields(8, 7)
+                        case 151:
+                            discord_messenger.update_fields(8, 8)
+                        case 100:
+                            discord_messenger.update_fields(8, 9)
+                        case 150:
+                            print("Restocking tritium...")
+                            time.sleep(2)
+                            threading.Thread(
+                                target=restock_tritium,
+                                args=(options, SEQUENCE_DIR),
+                                daemon=True,
+                            ).start()
+
+                    time.sleep(1)
+                    total_time -= 1
+                print()
+                discord_messenger.update_fields(9, 9)
+
+            done_first = True
+
+        state.route_complete = True
+        print("Route complete!")
+        discord_messenger.post_to_discord(
+            "Carrier Arrived",
+            options.webhook_url,
+            route_name,
+            f"The route is complete, and the carrier has arrived at {final_line}.",
+            "o7",
+        )
+        if options.shutdown_on_complete:
+            os.system("shutdown /s /t 30")
+        else:
+            print("Shutdown on completion is disabled. Exiting without powering off.")
+        return True
+    except KeyboardInterrupt:
+        print("\nTraversal interrupted. Saving progress before exiting...")
+        maybe_save_progress()
+        return False
+    finally:
+        maybe_save_progress()
 
 
 def main() -> None:
