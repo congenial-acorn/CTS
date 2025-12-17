@@ -1,7 +1,7 @@
 # CTS (Carrier Traversal System)
 The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
 
-This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
+This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). The majority of the code in this repository derives from the original.
 
 ## Traversal features
 * Automatic jump plotting
