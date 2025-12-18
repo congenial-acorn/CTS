@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import datetime
+import json
 import os
 import random
 import threading
@@ -9,6 +10,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Tuple
+import urllib.error
+import urllib.request
 
 import psutil
 import pyautogui
@@ -32,6 +35,62 @@ pyautogui.FAILSAFE = False
 
 SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
+
+
+def parse_version_tag(tag: str) -> int:
+    cleaned_tag = tag.strip().lstrip("vV")
+    parts = cleaned_tag.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"Invalid version tag: {tag}")
+    return int("".join(parts))
+
+
+GITHUB_REPO_OWNER = "congenial-acorn"
+GITHUB_REPO_NAME = "CATS"
+GITHUB_RELEASES_API = (
+    f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
+)
+LOCAL_VERSION_TAG = "v1.3.1"
+LOCAL_VERSION = parse_version_tag(LOCAL_VERSION_TAG)
+VERSION_CHECK_USER_AGENT = "CTS-Version-Check"
+
+
+def fetch_latest_release_version() -> Tuple[int, str]:
+    request = urllib.request.Request(
+        GITHUB_RELEASES_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": VERSION_CHECK_USER_AGENT,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+
+    tag_name = payload.get("tag_name")
+    if not tag_name:
+        raise ValueError("No tag_name in GitHub release response.")
+
+    return parse_version_tag(tag_name), tag_name
+
+
+def warn_if_outdated() -> None:
+    try:
+        latest_version, latest_tag = fetch_latest_release_version()
+    except (urllib.error.URLError, ValueError, json.JSONDecodeError, TimeoutError) as exc:
+        print(f"Version check skipped: {exc}")
+        return
+    except Exception as exc:  # safeguard against unexpected errors
+        print(f"Version check skipped: {exc}")
+        return
+
+    if latest_version > LOCAL_VERSION:
+        print(
+            f"Update available. You are on {LOCAL_VERSION_TAG}, but the latest release is "
+            f"{latest_tag}. Please download the newest version from GitHub. "
+            f"https://github.com/congenial-acorn/CTS/releases/latest"
+        )
+        time.sleep(3)
+    
 
 
 @dataclass(slots=True)
@@ -666,6 +725,7 @@ def run_traversal(options: TraversalOptions) -> bool:
 def main() -> None:
     print("Autopilot Script Online")
     print(f"Screen resolution: {screen_width}x{screen_height}")
+    warn_if_outdated()
 
     try:
         options = load_settings()
