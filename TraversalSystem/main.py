@@ -50,7 +50,7 @@ GITHUB_REPO_NAME = "CATS"
 GITHUB_RELEASES_API = (
     f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
 )
-LOCAL_VERSION_TAG = "v1.3.1"
+LOCAL_VERSION_TAG = "v1.3.3"
 LOCAL_VERSION = parse_version_tag(LOCAL_VERSION_TAG)
 VERSION_CHECK_USER_AGENT = "CTS-Version-Check"
 
