@@ -16,7 +16,6 @@ import pydirectinput
 import pyperclip
 import pytz
 import tzlocal
-import sys
 
 from config import BASE_DIR, TraversalOptions, load_settings
 from discordhandler import DiscordHandler
@@ -51,7 +50,7 @@ def slight_random_time(base: float) -> float:
 
 
 def load_route_list(route_file: Path) -> List[str]:
-    if route_file.name.startswith("fleet-carrier-") and route_file.suffix.lower() == ".csv":
+    if route_file.suffix.lower() == ".csv":
         return _load_carrier_csv(route_file)
 
     content = route_file.read_text(encoding="utf-8").strip()
