@@ -1,7 +1,8 @@
 discord_webhook==1.3.1
 psutil==6.1.1
 pyautogui==0.9.54
-pydirectinput==1.0.4
+pydirectinput==1.0.4; sys_platform == 'win32'
+pynput==1.7.7; sys_platform != 'win32'
 pyperclip==1.9.0
 pytz==2025.1
 pyinstaller==6.11.1
