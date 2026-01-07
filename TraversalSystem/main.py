@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import datetime
 import json
 import os
@@ -15,7 +14,6 @@ import urllib.request
 
 import psutil
 import pyautogui
-import pydirectinput
 import pyperclip
 import pytz
 import tzlocal
@@ -24,13 +22,17 @@ from config import BASE_DIR, TraversalOptions, load_settings
 from discordhandler import DiscordHandler
 from journalwatcher import JournalWatcher
 from reshandler import Reshandler
+from platform_utils import (
+    get_screen_resolution,
+    open_steam_game,
+    system_shutdown,
+    get_game_process_names,
+    IS_WINDOWS,
+)
+import input_handler
 
-
-user32 = ctypes.windll.user32
-ctypes.windll.shcore.SetProcessDpiAwareness(2)
-
-# Get the screen resolution
-screen_width, screen_height = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+# Get the screen resolution in a cross-platform manner
+screen_width, screen_height = get_screen_resolution()
 pyautogui.FAILSAFE = False
 
 SEQUENCE_DIR = BASE_DIR / "sequences"
@@ -50,7 +52,7 @@ GITHUB_REPO_NAME = "CATS"
 GITHUB_RELEASES_API = (
     f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/releases/latest"
 )
-LOCAL_VERSION_TAG = "v1.3.3"
+LOCAL_VERSION_TAG = "v1.4.0"
 LOCAL_VERSION = parse_version_tag(LOCAL_VERSION_TAG)
 VERSION_CHECK_USER_AGENT = "CTS-Version-Check"
 
@@ -166,9 +168,9 @@ def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
     for line in sequence_path.read_text(encoding="utf-8").splitlines():
         if ":" in line:
             key, duration = line.split(":", 1)
-            pydirectinput.keyDown(key)
+            input_handler.keyDown(key)
             time.sleep(slight_random_time(float(duration)))
-            pydirectinput.keyUp(key)
+            input_handler.keyUp(key)
         else:
             wait_time = 0.1
             key = line
@@ -177,7 +179,7 @@ def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
                 key, wait_raw = line.split("-", 1)
                 wait_time = float(wait_raw)
 
-            pydirectinput.press(key)
+            input_handler.press(key)
             time.sleep(slight_random_time(wait_time))
 
 
@@ -195,14 +197,14 @@ def restock_tritium(options: TraversalOptions, sequence_dir: Path) -> None:
 
         if step == "open_cargo_transfer":
             if options.refuel_mode == 1:
-                pydirectinput.press("w")
+                input_handler.press("w")
                 time.sleep(slight_random_time(0.1))
 
             for _ in range(options.tritium_slot):
                 if options.refuel_mode in (1, 2):
-                    pydirectinput.press("s")
+                    input_handler.press("s")
                 else:
-                    pydirectinput.press("w")
+                    input_handler.press("w")
                 time.sleep(slight_random_time(0.1))
 
     print("Refuel process completed.")
@@ -236,24 +238,24 @@ def jump_to_system(
     else:
         follow_button_sequence(sequence_dir, "jump_nav_1.txt")
 
-    pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
+    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press("space")
+    input_handler.press("space")
     pyperclip.copy(system_name.lower())
     time.sleep(slight_random_time(1.0))
-    pydirectinput.keyDown("ctrl")
+    input_handler.keyDown("ctrl")
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press("v")
+    input_handler.press("v")
     time.sleep(slight_random_time(0.1))
-    pydirectinput.keyUp("ctrl")
+    input_handler.keyUp("ctrl")
     time.sleep(slight_random_time(3.0))
-    pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
+    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press("space")
+    input_handler.press("space")
     time.sleep(slight_random_time(0.1))
-    pyautogui.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
+    input_handler.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press("space")
+    input_handler.press("space")
 
     time.sleep(6)
 
@@ -270,9 +272,9 @@ def jump_to_system(
 
     delta = departure_time - current_time
 
-    pydirectinput.press("backspace")
+    input_handler.press("backspace")
     time.sleep(slight_random_time(0.1))
-    pydirectinput.press("backspace")
+    input_handler.press("backspace")
 
     return int(delta.total_seconds()), departure_time
 
@@ -343,7 +345,7 @@ def open_game(
 ) -> None:
     print("Re-opening game...")
 
-    os.startfile("steam://rungameid/359320")
+    open_steam_game("359320")
     time.sleep(60)
 
     journal_path = latest_journal_path(options.journal_directory)
@@ -361,8 +363,8 @@ def open_game(
     time.sleep(10)
 
     print("Starting game...")
-    pyautogui.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
-    pyautogui.click()
+    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
+    input_handler.click()
     follow_button_sequence(SEQUENCE_DIR, "start_game.txt")
 
     loaded = False
@@ -373,7 +375,7 @@ def open_game(
             loaded = True
         else:
             print("Game not loaded...")
-            pydirectinput.press("space")
+            input_handler.press("space")
             time.sleep(10)
 
     print("Switching to new journal...")
@@ -529,8 +531,9 @@ def run_traversal(options: TraversalOptions) -> bool:
                     ).start()
                     state.game_ready = False
                     print("Game open scheduled")
+                    game_process_names = get_game_process_names()
                     for proc in psutil.process_iter():
-                        if proc.name() == "EDLaunch.exe":
+                        if proc.name() in game_process_names:
                             proc.kill()
                     print("Launcher killed")
 
@@ -710,7 +713,7 @@ def run_traversal(options: TraversalOptions) -> bool:
         )
             print("Shutting down system in 30 seconds...")
             time.sleep(5)
-            os.system("shutdown /s /t 30")
+            system_shutdown(30)
         else:
             print("Shutdown on completion is disabled. Exiting without powering off.")
         return True

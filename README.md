@@ -15,16 +15,41 @@ This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). 
 * Saves and resumes if interupted while traveling along the route. 
 
 ## Limitations
-* This only works on Windows. A future port to Linux is possible, though highly unlikely.
+* Supports Windows natively and Linux (via Proton/Wine). macOS is untested.
 * Odyssey is required; Horizons is not supported.
 * The autopilot has experimental support for displays running at resolutions other than 1920x1080, though most resolutions haven't been tested.
 * Elite Dangerous should be running on your primary monitor in fullscreen.
 * Officially supported resolutions can be found in the `resolutions.md` file.
 * Elite needs to be using the default keybinds - if you've got custom keybinds, or are using a controller or HOTAS, you should back up your binds then reset to default keyboard+mouse.
 
+### Linux-specific notes
+* Elite Dangerous must be running via Steam with Proton.
+* The journal directory on Linux is typically located at: `~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`
+* Requires X11 display server (Wayland compatibility may vary).
+* The `xrandr` utility should be available for screen resolution detection.
+
 ## Installation
+
+### Windows
 * **Release build (recommended):** Download the latest zip from GitHub Releases. Extract it and keep everything in the extracted `TraversalSystem` folder together (exe plus data files).
-* **From source:** Install Python + `requirements.txt`, then run `python TraversalSystem/main.py` or build with `build_TraversalSystem.sh`. 
+* **From source:** Install Python + `requirements.txt`, then run `python TraversalSystem/main.py` or build with `build_TraversalSystem.sh`.
+
+### Linux
+* Install Python 3.10+ and required system packages:
+  ```bash
+  # Debian/Ubuntu
+  sudo apt install python3 python3-pip python3-venv xdotool xclip
+
+  # Arch Linux
+  sudo pacman -S python python-pip xdotool xclip
+  ```
+* Clone the repository and install dependencies:
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  pip install -r requirements.txt
+  ```
+* Run with: `python TraversalSystem/main.py` 
 
 ## Updating
 * **Release exe:** Download the .exe file from the release and replace the old one in your TraversalSystem folder. 
@@ -45,7 +70,9 @@ Place/keep these files alongside the exe, whether running from release or from s
 ### Configure the files
 * `settings.ini` (all options in one file)
   * `webhook_url=` Discord webhook URL (leave blank to disable messages)
-  * `journal_directory=` path to your Elite Dangerous journals (e.g. `~\Saved Games\Frontier Developments\Elite Dangerous\`)
+  * `journal_directory=` path to your Elite Dangerous journals:
+    * **Windows:** `~\Saved Games\Frontier Developments\Elite Dangerous\`
+    * **Linux (Proton):** `~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`
   * `tritium_slot=` integer offset used when navigating cargo transfer for refuel. See section [Refueling Setup](#refueling-setup) below for instructions on how to set.
   * `route_file=` route file path; relative paths resolve next to `settings.ini` See section [Route Setup](#route-setup) below for instructions on how to set.
    * `route_position=` which entry to start from in the route file. `0` means start before the first line, `1` skips the first line, etc. (Overridden if a save file is present.)
