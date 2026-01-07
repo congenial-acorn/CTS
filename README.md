@@ -135,4 +135,4 @@ Use of programs like this is technically against Frontier's TOS. While they have
 
 ## Legal
 
-The source code is released under the [MIT License](https://github.com/congenial-acorn/CTS/blob/main/LICENSE). Neither the tool or the developer is associated with or endorsed by Frontier Developments, Elite Dangerous, or any other member or tool of the Elite Dangerous community.
+The source code is released under the [MIT License](https://github.com/congenial-acorn/CTS/blob/master/LICENSE). Neither the tool or the developer is associated with or endorsed by Frontier Developments, Elite Dangerous, or any other member or tool of the Elite Dangerous community.
