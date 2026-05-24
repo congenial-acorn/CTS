@@ -1,3 +1,18 @@
+# [2.0.0-alpha.1]
+## Added
+- Graphical interface for configuring and running carrier traversal — no more manual text file editing.
+- Set up multiple carriers in separate slots, each with its own commander, route file, and refuel options.
+- Carrier slots auto-detect which game client belongs to which commander when possible, with manual selection as a fallback.
+- Start all carriers at once from one dashboard. Each carrier runs independently — one failing doesn't stop the others.
+- Import your existing `settings.ini` to migrate to the new GUI config. Export a slot back to legacy format when needed.
+- Elite Dangerous themed dark interface with orange and cyan accents.
+
+## Changed
+- GUI is now the primary way to configure and run CTS.
+- Command-line interface is still available as a fallback if needed.
+
+---
+
 # [1.4.0]
 ## Added
 - Linux compatibility via Proton/Wine support.
