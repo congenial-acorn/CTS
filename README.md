@@ -4,35 +4,29 @@ The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumpe
 This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). The majority of the code in this repository derives from the original.
 
 ## Traversal features
-* Automatic jump plotting
-* Supports personal and squadron carriers, including Drake-, Fortune-, Victory-, Nautilus-, and Javelin-class carriers
-* Tritium restocking workflows for personal and squadron refuel modes
-* Route time estimation and Discord webhook updates
-* Simple GUI-free workflow that drives the Elite interface directly
-* Adjusts for variable jump timers
-* Imports routes from plain text
-* Supports route import from [Spansh fleet carrier router](https://spansh.co.uk/fleet-carrier).
-* Saves and resumes if interupted while traveling along the route. 
+* Automatic jump plotting.
+* Supports personal and squadron carriers, including Drake, Fortune, Victory, Nautilus, and Javelin class carriers.
+* Tritium restocking workflows for personal and squadron refuel modes.
+* Route time estimation and Discord webhook updates.
+* Multi-carrier graphical workflow with dynamic commander binding.
+* Adjusts for variable jump timers.
+* Imports routes from plain text or Spansh fleet carrier router.
+* Saves and resumes if interrupted while traveling.
 
-## Limitations
+## Limitations and Safety Guards
+* **X11-only Linux automation limitation:** Window detection and keyboard/mouse command dispatch on Linux depend on X11 APIs. This means Wayland environments are not natively supported and automated traversal will fail to send game input.
+* **Ambiguous fail-closed safety rules:** If multiple game clients are detected, or if active game window focus is lost, CTS defaults to a strict fail-closed safety state. The active worker thread immediately halts and transitions the slot to an error state, preventing inputs from leaking to other applications.
+* **Game Automation Disclaimer:** Automated flight sequences are thoroughly validated using mock inputs and test suites. Real-world Elite Dangerous automation has not been verified on live player accounts beyond these isolated environments. Use this tool entirely at your own risk.
 * Supports Windows natively and Linux (via Proton/Wine). macOS is untested.
 * Odyssey is required; Horizons is not supported.
-* The autopilot has experimental support for displays running at resolutions other than 1920x1080, though most resolutions haven't been tested.
-* Elite Dangerous should be running on your primary monitor in fullscreen.
-* Officially supported resolutions can be found in the `resolutions.md` file.
-* Elite needs to be using the default keybinds - if you've got custom keybinds, or are using a controller or HOTAS, you should back up your binds then reset to default keyboard+mouse.
-
-### Linux-specific notes
-* Elite Dangerous must be running via Steam with Proton.
-* The journal directory on Linux is typically located at: `~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`
-* Requires X11 display server (Wayland compatibility may vary).
-* The `xrandr` utility should be available for screen resolution detection.
+* Default game keybinds must be configured. Reset to default keyboard+mouse if you use custom binds, a controller, or HOTAS.
+* Supported screen resolutions are listed in `resolutions.md`.
 
 ## Installation
 
 ### Windows
-* **Release build (recommended):** Download the latest zip from GitHub Releases. Extract it and keep everything in the extracted `TraversalSystem` folder together (exe plus data files).
-* **From source:** Install Python + `requirements.txt`, then run `python TraversalSystem/main.py` or build with `build_TraversalSystem.sh`.
+* **Release build (recommended):** Download the latest zip from GitHub Releases. Extract the archive and open the `TraversalSystem` directory.
+* **From source:** Install Python 3.12+ and dependencies, then run `python TraversalSystem/gui_main.py` for the GUI or `python TraversalSystem/main.py` for the legacy CLI.
 
 ### Linux
 * Install Python 3.10+ and required system packages:
@@ -43,96 +37,122 @@ This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). 
   # Arch Linux
   sudo pacman -S python python-pip xdotool xclip
   ```
-* Clone the repository and install dependencies:
+* Clone the repository and configure the virtual environment:
   ```bash
   python3 -m venv venv
   source venv/bin/activate
   pip install -r requirements.txt
   ```
-* Run with: `python TraversalSystem/main.py` 
+* Start the application with: `python TraversalSystem/gui_main.py`
 
-## Updating
-* **Release exe:** Download the .exe file from the release and replace the old one in your TraversalSystem folder. 
-  * This is the recomended option unless otherwise noted in the release notes. 
-* **Release zip:** Download the .zip file and copy your configuration files into the new TraversalSystem folder. 
-  * The second option is necessary if noted in the release notes.
+## GUI Configuration and Workflow
 
-## Necessary files
-Place/keep these files alongside the exe, whether running from release or from source:
-* `settings.ini`
-* The file with your route
-* `res.csv`
-* `photos.txt`
-* `sequences/` folder
+CTS now uses a GUI-first workflow as the primary setup and operating path. A graphical GUI configuration tool manages multiple accounts and universal settings.
 
-## Traversal system usage
+### The Configuration File (`gui_config.json`)
+The graphical application stores all configurations in `gui_config.json` at the root directory. This JSON file is the single authoritative source of truth. Its schema version is pinned to `1` to ensure compatibility.
 
-### Configure the files
-* `settings.ini` (all options in one file)
-  * `webhook_url=` Discord webhook URL (leave blank to disable messages)
-  * `journal_directory=` path to your Elite Dangerous journals:
-    * **Windows:** `~\Saved Games\Frontier Developments\Elite Dangerous\`
-    * **Linux (Proton):** `~/.local/share/Steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous/`
-  * `tritium_slot=` integer offset used when navigating cargo transfer for refuel. See section [Refueling Setup](#refueling-setup) below for instructions on how to set.
-  * `route_file=` route file path; relative paths resolve next to `settings.ini` See section [Route Setup](#route-setup) below for instructions on how to set.
-   * `route_position=` which entry to start from in the route file. `0` means start before the first line, `1` skips the first line, etc. (Overridden if a save file is present.)
-  * `auto-plot-jumps=` true to let CATS plot jumps; false for manual prompts
-  * `disable-refuel=` true to skip restocking
-  * `auto-plot-jumps=` true to let CATS plot jumps; false for manual prompts
-  * `disable-refuel=` true to skip restocking
-  * `power-saving=` true to close/reopen the game between jumps (Steam only, highly experimental)
-  * `refuel-mode=` 0 personal (first 8 items), 1 personal (after 8 items), 2 squadron
-  * `single-discord-message=` true to edit one webhook message instead of posting new ones
-  * `shutdown-on-complete=` true to power off when the route finishes
-* Your route file (whatever you set in `route_file`): See section [Route Setup](#route-setup) below.
+### Universal Settings
+These global settings apply across all slots:
+* **journal_directory:** Path to your Elite Dangerous journal folder.
+* **auto_detect_window:** Automatically matches game client window handles.
+* **focus_timeout_seconds:** Seconds to wait for a game window to gain focus before halting (defaults to 5).
+* **ambiguous_window_policy:** If multiple game windows are detected, this policy determines the action. Setting this to `abort` halts the system immediately. Specifying `manual` lets the user select the target window handle.
+* **webhook_url:** Optional Discord webhook link for status updates.
+* **single_discord_message:** Edits a single webhook message instead of creating new posts.
+* **shutdown_on_complete:** Powers down the system after completing the route.
 
-### Refueling Setup
-Read this section carefully and follow the instructions, as refuelling needs to have the options set correctly in order to function.
+### Carrier Slots
+You can configure multiple carriers in individual carrier slots (0-based indices). Each slot holds independent settings:
+* **Frontier ID (FID):** The unique player identifier (e.g., F123456) extracted from game journals. Slots start as `unbound` and only become `ready` when the system discovers the FID in game logs.
+* **Commander Name:** The player name associated with the slot.
+* **Route File:** Path to a `.txt` or `.csv` route file.
+* **Tritium Slot:** Cargo inventory position offset for refueling.
+* **Refuel Mode:** Refueling behavior (0 for first 8 cargo items, 1 for items after the first 8, 2 for squadron carriers).
+* **Toggles:** Turn individual slot refueling or automated jump plotting on or off.
 
-#### Using a PERSONAL carrier
-* Fill the carrier's tritium depot to full (1000 tritium).
-* Use a ship with at least 200 cargo capacity.
-* Fill your ship's cargo hold with tritium FROM your carrier.
-* If this entry is in the first 8 items, i.e. you can reach it without pressing S:
-  * In `settings.ini`, set `refuel-mode=0`
-  * Count how many times you have to press W to get to that entry from the "Confirm Items Transfer" button.
-  * Set `tritium_slot=` equal to that number.
-* If the entry is not in the first 8 items:
-    * In `settings.ini`, set `refuel-mode=1`
-    * Back out of the transfer menu, then go back into it.
-    * Press W, then count how many times you have to press S to get to that entry.
-    * Set `tritium_slot=` equal to that number.
+### Binding Controller
+Automated operations require binding a configuration slot to a live game client window.
+* **Auto-binding:** The system scans game journals to discover active commanders and their FIDs. When it detects a unique matching game window, it automatically binds the slot and transitions it to `ready`.
+* **Manual binding:** If automatic matching fails, you can trigger a manual binding. This opens a selector to bind a slot to a specific Frontier ID and active window handle. If the target FID was never seen in local journals, the slot stays `unbound` as a safety guard.
 
-#### Using a SQUADRON carrier
-* In `settings.ini`, set `refuel-mode=2`
-* Fill the carrier's tritium depot to full (1000 tritium).
-* Use a ship with at least 200 cargo capacity.
-* Fill your ship's cargo hold with tritium.
-* Go to the squadron bank menu and select the Commodities section.
-* Hover over the top commodity in the list.
-* Count how many times you have to press S to get to the tritium you want to use (if it's at the top, this would be 0).
-* Set `tritium_slot=` equal to that number.
+### Dashboard Start and Stop Controls
+The dashboard panel coordinates active automation threads:
+* **Start All:** Begins traversal loops for all enabled, `ready` slots concurrently. Each carrier executes on its own isolated background thread.
+* **Stop All:** Signals all active workers to halt. Affected slot workers transition gracefully from `stopping` to `stopped`.
+* **Slot Enablement:** Individual slot widgets feature a checkbox. Unchecking this excludes the carrier slot from the mass start command.
 
-### Route Setup
-Either download a .csv from the Spansh fleet carrier router (easiest). Or, put each system of your route on a new line in `route.txt` or any other .txt file.
+## Legacy Import and Export
 
-Whichever option you choose, set `route_file` in `settings.ini` to the file name of the route. 
+You can migrate your existing files or share slot configurations using the legacy import/export features.
+* **Legacy Import:** Select a legacy flat `settings.ini` to read its parameters. The tool creates a new `gui_config.json` with universal settings and places the legacy values into carrier slot 0. This is a one-way migration action, not a continuous synchronization.
+* **Legacy Export:** Select a carrier slot index and export its parameters combined with universal settings to a legacy-compatible `settings.ini`. A comment line is prepended to the exported file to remind you that `gui_config.json` remains the authoritative source.
 
-If needed, you can also set `route_position` to correspond to your current location along the route. If you are one jump away from the starting route system, set this value to 0. If you are at the first system on the route, set this value to 1, and so on. 
+## Legacy CLI Workflow (Rollback Path)
 
-### Starting the route
+If you need to rollback to the GUI-free command-line interface, you can still do so. The legacy entrypoint remains fully functional for backward compatibility.
+
+### Legacy Configuration (`settings.ini`)
+Create a flat `settings.ini` next to the executable. Fill in these properties:
+* `webhook_url=` Discord webhook URL.
+* `journal_directory=` Path to Elite Dangerous journals.
+* `target-fid=` The Frontier ID to automate.
+* `tritium_slot=` Tritium cargo slot offset.
+* `route_file=` Path to your route file.
+* `route_position=` Route starting offset.
+* `auto-plot-jumps=` Set to `true` to let the system plot jumps automatically.
+* `disable-refuel=` Set to `true` to skip refueling operations.
+* `refuel-mode=` 0 for personal (first 8), 1 for personal (after 8), 2 for squadron.
+* `single-discord-message=` Set to `true` to edit a single webhook message.
+* `shutdown-on-complete=` Set to `true` to turn off the computer when finished.
+
+### Starting the Legacy Route
 * Dock with your carrier.
-* Make sure your cursor is over the "Carrier Services" option, and that your internal panel (right) is on the home tab.
-* Edit `settings.ini` with your journal directory, Discord webhook, tritium slot, route file location, and behaviour toggles.
-* Make sure you've set up your [refueling configuration](#refueling-setup) and [route configuration](#route-setup) properly.
-* Run the packaged `TraversalSystem.exe` (or `python TraversalSystem/main.py` from source), then tab to the Elite Dangerous window. It should now start to plot jumps.
+* Position your game cursor over the "Carrier Services" option.
+* Ensure your internal panel (right) is on the home tab.
+* Run `python TraversalSystem/main.py` or the legacy executable.
+* Tab back to the Elite Dangerous window to allow automation input.
 
-### Resuming the route
-If the traversal system is exited for any reason before the route ends (Ctrl+C, unhandled exception), a save file will be created that saves your current location along the route. You can simply reopen the .exe to resume the route. The value in `save.txt` will overwrite any value in `route_position`. 
+## Refueling Setup
 
-## Traversal system disclaimer
-Use of programs like this is technically against Frontier's TOS. While they haven't yet banned people for automating carrier jumps, the developer does not take any responsibility for any actions that could be taken against your account. Use at your own risk!
+Refueling must have options configured correctly to function. Use the guidelines below to set your `tritium_slot` and `refuel_mode` values (either in the GUI slot editor or your legacy `settings.ini`).
 
-## Legal
+### Using a PERSONAL carrier
+* Fill the carrier depot to full (1000 tritium).
+* Choose a ship with at least 200 cargo capacity.
+* Load your ship cargo hold with tritium from your carrier cargo.
+* If your tritium is in the first 8 inventory items (accessible without scrolling down):
+  * Set `refuel_mode` to 0.
+  * Count the number of times you must press W to navigate from "Confirm Items Transfer" to that entry.
+  * Set `tritium_slot` to that counted offset.
+* If your tritium is not in the first 8 inventory items:
+  * Set `refuel_mode` to 1.
+  * Back out of the transfer menu, then enter it again.
+  * Press W once, then count the number of times you must press S to navigate to that entry.
+  * Set `tritium_slot` to that counted offset.
 
-The source code is released under the [MIT License](https://github.com/congenial-acorn/CTS/blob/master/LICENSE). Neither the tool or the developer is associated with or endorsed by Frontier Developments, Elite Dangerous, or any other member or tool of the Elite Dangerous community.
+### Using a SQUADRON carrier
+* Set `refuel_mode` to 2.
+* Fill the carrier depot to full (1000 tritium).
+* Choose a ship with at least 200 cargo capacity.
+* Load your ship cargo hold with tritium.
+* Open the squadron bank commodities section.
+* Hover over the topmost commodity in the inventory list.
+* Count the number of times you must press S to reach the tritium you want to use (0 if it is already at the top).
+* Set `tritium_slot` to that counted offset.
+
+## Route Setup
+
+Acquire your jump sequence from the Spansh fleet carrier router or list your target systems on consecutive lines in a plain text file. Specify this route file path in your slot configuration or legacy configuration file.
+
+Starting index 0 begins before the first system on the list. A value of 1 skips the first entry.
+
+## Resuming the Route
+
+If automated traversal is interrupted by an error or user cancellation, CTS writes a `save.txt` file recording your current index along the route. Reopening the system will read this file and resume your journey from the exact location. This saved index overrides any default starting value.
+
+## Disclaimer and Legal
+
+Frontier Dangerous terms of service strictly prohibit automated client automation. The developers take zero responsibility for any actions taken against your game account. Use this tool entirely at your own risk.
+
+The source code is licensed under the MIT License. This software is not associated with or endorsed by Frontier Developments.
