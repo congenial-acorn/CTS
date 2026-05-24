@@ -1,0 +1,6 @@
+{"timestamp":"2026-04-25T12:00:00Z","event":"Fileheader","gameversion":"4.0","build":"r280401","Part":1}
+{"timestamp":"2026-04-25T12:00:01Z","event":"Commander","FID":"FID-PRIMARY","Name":"PrimaryCmdr"}
+{"timestamp":"2026-04-25T12:00:02Z","event":"LoadGame","FID":"FID-PRIMARY","Commander":"PrimaryCmdr"}
+{"timestamp":"2026-04-25T12:00:03Z","event":"CarrierStats","FuelLevel":800}
+{"timestamp":"2026-04-25T12:00:04Z","event":"CarrierJumpRequest","SystemName":"Sol","DepartureTime":"2026-04-25T12:15:00Z"}
+{"timestamp":"2026-04-25T12:00:05Z","event":"CarrierJump","SystemName":"Sol","StarSystem":"Sol"}

@@ -10,7 +10,7 @@ __pycache__/
 /.vscode
 /.idea
 .sisyphus/
-
+.omo/
 # Built installer
 /setup/CATSSetup.exe
 
@@ -19,3 +19,4 @@ __pycache__/
 /TraversalSystem/route.txt
 *.exe
 TraversalSystem/route.txt
+

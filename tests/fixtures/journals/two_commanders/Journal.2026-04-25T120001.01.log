@@ -1,0 +1,5 @@
+{"timestamp":"2026-04-25T12:00:00Z","event":"Fileheader","gameversion":"4.0","build":"r280401","Part":1}
+{"timestamp":"2026-04-25T12:00:01Z","event":"Commander","FID":"FID-SECONDARY","Name":"SecondaryCmdr"}
+{"timestamp":"2026-04-25T12:00:02Z","event":"LoadGame","FID":"FID-SECONDARY","Commander":"SecondaryCmdr"}
+{"timestamp":"2026-04-25T12:00:03Z","event":"CarrierStats","FuelLevel":600}
+{"timestamp":"2026-04-25T12:00:04Z","event":"CarrierJumpRequest","SystemName":"Deciat","DepartureTime":"2026-04-25T12:20:00Z"}
