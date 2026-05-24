@@ -492,14 +492,15 @@ class TestSaveCreatesDirs:
 
 class TestDefaultRouteDirectory:
     def test_default_route_directory_loaded(self, tmp_path: Path):
+        route_dir = str(tmp_path / "routes")
         data = {
             "schema_version": 1,
-            "universal": {"default_route_directory": "/tmp/routes"},
+            "universal": {"default_route_directory": route_dir},
             "carrier_slots": [],
         }
         p = _write_json(tmp_path, data)
         cfg = load_gui_config(p)
-        assert Path(cfg.universal.default_route_directory) == Path("/tmp/routes")
+        assert cfg.universal.default_route_directory == route_dir
 
     def test_default_route_directory_empty_when_absent(self, tmp_path: Path):
         data = {"schema_version": 1, "universal": {}, "carrier_slots": []}
@@ -528,11 +529,12 @@ class TestDefaultRouteDirectory:
 
     def test_round_trip_preserves_default_route_directory(self, tmp_path: Path):
         cfg = load_gui_config(FIXTURES / "valid_single_slot.json")
-        cfg.universal.default_route_directory = "/custom/routes"
+        route_dir = str(tmp_path / "custom" / "routes")
+        cfg.universal.default_route_directory = route_dir
         out_path = tmp_path / "rt.json"
         save_gui_config(cfg, out_path)
         cfg2 = load_gui_config(out_path)
-        assert Path(cfg2.universal.default_route_directory) == Path("/custom/routes")
+        assert cfg2.universal.default_route_directory == route_dir
 
 
 # ===================================================================

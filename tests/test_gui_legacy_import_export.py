@@ -167,12 +167,13 @@ class TestImportRouteFileResolution:
         assert route.endswith("my_route.txt")
 
     def test_absolute_route_preserved(self, tmp_path: Path):
+        route_file = str(tmp_path / "absolute" / "route.txt")
         ini = _write_ini(
             tmp_path,
-            "webhook_url=\njournal_directory=~\nroute_file=/absolute/route.txt\n",
+            f"webhook_url=\njournal_directory=~\nroute_file={route_file}\n",
         )
         cfg = import_legacy_settings(ini)
-        assert Path(cfg.carrier_slots[0].route_file) == Path("/absolute/route.txt")
+        assert cfg.carrier_slots[0].route_file == route_file
 
 
 class TestImportMissingFile:
