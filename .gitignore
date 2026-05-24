@@ -2,13 +2,14 @@
 /TraversalSystem/Python39/
 /TraversalSystem/pyinstaller/
 /TraversalSystem/main.exe
-
+__pycache__/
 # Visual Studio stuff
 /.vs
 
 # VSCode stuff
 /.vscode
 /.idea
+.sisyphus/
 
 # Built installer
 /setup/CATSSetup.exe

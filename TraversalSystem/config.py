@@ -50,6 +50,31 @@ def _as_int(value: str | None, default: int = 0) -> int:
         return default
 
 
+_VALID_AMBIGUOUS_POLICIES = frozenset({"abort", "manual"})
+_DEFAULT_FOCUS_TIMEOUT = 5
+
+
+def _parse_focus_timeout(value: str | None) -> int:
+    raw = _as_int(value, default=-1)
+    if raw == -1:
+        return _DEFAULT_FOCUS_TIMEOUT
+    if raw < 1:
+        return 1
+    return raw
+
+
+def _parse_ambiguous_policy(value: str | None) -> str:
+    if not value or not value.strip():
+        return "abort"
+    policy = value.strip().lower()
+    if policy not in _VALID_AMBIGUOUS_POLICIES:
+        raise ValueError(
+            f"ambiguous-window-policy must be one of "
+            f"{sorted(_VALID_AMBIGUOUS_POLICIES)}, got '{policy}'"
+        )
+    return policy
+
+
 @dataclass(slots=True)
 class TraversalOptions:
     webhook_url: str
@@ -63,6 +88,11 @@ class TraversalOptions:
     refuel_mode: int = 0
     single_discord_message: bool = False
     shutdown_on_complete: bool = True
+    multi_commander_enabled: bool = False
+    target_fid: str = ""
+    auto_detect_window: bool = True
+    focus_timeout_seconds: int = 5
+    ambiguous_window_policy: str = "abort"
 
 
 def load_settings(
@@ -84,7 +114,7 @@ def load_settings(
     if not route_file.is_absolute():
         route_file = settings_file.parent / route_file
 
-    return TraversalOptions(
+    opts = TraversalOptions(
         webhook_url=settings_values.get("webhook_url", ""),
         journal_directory=journal_directory,
         route_file=route_file,
@@ -102,4 +132,24 @@ def load_settings(
         shutdown_on_complete=_as_bool(
             settings_values.get("shutdown-on-complete"), default=True
         ),
+        multi_commander_enabled=_as_bool(
+            settings_values.get("multi-commander-enabled"), default=False
+        ),
+        target_fid=settings_values.get("target-fid", ""),
+        auto_detect_window=_as_bool(
+            settings_values.get("auto-detect-window"), default=True
+        ),
+        focus_timeout_seconds=_parse_focus_timeout(
+            settings_values.get("focus-timeout-seconds")
+        ),
+        ambiguous_window_policy=_parse_ambiguous_policy(
+            settings_values.get("ambiguous-window-policy")
+        ),
     )
+
+    if opts.multi_commander_enabled and not opts.target_fid.strip():
+        raise ValueError(
+            "target-fid must be non-empty when multi-commander-enabled is true"
+        )
+
+    return opts
