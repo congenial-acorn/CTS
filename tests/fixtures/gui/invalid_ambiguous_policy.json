@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "universal": {
+    "webhook_url": "",
+    "journal_directory": "~",
+    "multi_commander_enabled": true,
+    "auto_detect_window": true,
+    "focus_timeout_seconds": 5,
+    "ambiguous_window_policy": "prompt",
+    "single_discord_message": false,
+    "shutdown_on_complete": true,
+    "power_saving": false
+  },
+  "carrier_slots": []
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "universal": {
+    "webhook_url": "",
+    "journal_directory": "~",
+    "multi_commander_enabled": true,
+    "auto_detect_window": true,
+    "focus_timeout_seconds": 5,
+    "ambiguous_window_policy": "abort",
+    "single_discord_message": false,
+    "shutdown_on_complete": true,
+    "power_saving": false
+  },
+  "carrier_slots": [
+    {
+      "slot_index": 0,
+      "fid": "",
+      "commander_name": "",
+      "carrier_id": "",
+      "route_file": "",
+      "route_position": 0,
+      "tritium_slot": 0,
+      "refuel_mode": 0,
+      "auto_plot_jumps": true,
+      "disable_refuel": false,
+      "state": "ready"
+    }
+  ]
+}
