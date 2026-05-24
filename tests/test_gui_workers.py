@@ -22,15 +22,6 @@ from TraversalSystem.window_manager import WindowBinding, WindowInfo
 _ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-@pytest.fixture(scope="session")
-def qapp() -> Generator[QApplication, None, None]:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    assert isinstance(app, QApplication)
-    yield app
-
-
 def _wait_until(
     app: QApplication,
     predicate: Callable[[], bool],

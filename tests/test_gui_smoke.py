@@ -64,18 +64,8 @@ MULTICARRIER_FIXTURE = FIXTURE_DIR / "multicarrier_gui.json"
 MALFORMED_FIXTURE = FIXTURE_DIR / "malformed_json.json"
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    """Provide a singleton offscreen QApplication for the entire test session."""
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv[:1])
-    yield app
-
-
 @pytest.fixture
-def tmp_path(tmp_path):
-    """Provide a temporary directory with a minimal route file."""
+def route_tmp_path(tmp_path):
     (tmp_path / "route_gui1.txt").write_text("Sol\nDeciat\n", encoding="utf-8")
     (tmp_path / "route_gui2.csv").write_text("system,jumps\nSol,0\n", encoding="utf-8")
     return tmp_path

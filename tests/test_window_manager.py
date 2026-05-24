@@ -13,6 +13,7 @@ from __future__ import annotations
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownLambdaType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnusedParameter=false, reportPrivateUsage=false, reportUnnecessaryTypeIgnoreComment=false
 
 import subprocess
+from pathlib import Path
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -557,12 +558,14 @@ class TestSmokeCLI:
         """The smoke CLI runs without error even with no live windows."""
         import subprocess as sp
 
+        script = Path(__file__).parent / "CTS_window_smoke.py"
         result = sp.run(
-            [sys.executable, "CTS_window_smoke.py", "--dry-run",
+            [sys.executable, str(script), "--dry-run",
              "--target-fid", "TESTFID"],
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=Path(__file__).resolve().parent.parent,
         )
         assert result.returncode == 0
         assert "TESTFID" in result.stdout

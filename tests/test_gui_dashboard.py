@@ -51,13 +51,6 @@ _ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    yield app
-
 
 @pytest.fixture
 def tmp_path(tmp_path):

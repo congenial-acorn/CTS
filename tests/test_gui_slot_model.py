@@ -1,17 +1,8 @@
 import pytest # pyright: ignore[reportMissingImports]
-from collections.abc import Generator
 from PySide6.QtWidgets import QApplication # pyright: ignore[reportMissingImports]
 from TraversalSystem.gui_config import GuiConfig, CarrierSlotConfig # pyright: ignore[reportMissingImports]
 from TraversalSystem.gui.slot_model import SlotListModel # pyright: ignore[reportMissingImports]
 from TraversalSystem.gui.slot_editor import SlotEditorWidget # pyright: ignore[reportMissingImports]
-
-@pytest.fixture(scope="session")
-def qapp() -> Generator[QApplication, None, None]:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    assert isinstance(app, QApplication)
-    yield app
 
 @pytest.fixture
 def empty_config() -> GuiConfig:

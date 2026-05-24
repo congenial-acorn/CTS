@@ -1,6 +1,7 @@
 """Reusable pytest fixtures for CTS multicarrier tests.
 
 Provides:
+- qapp: a singleton offscreen QApplication shared across the entire session.
 - tmp_journal: a temporary directory containing a single Elite Dangerous
   JSON-line journal file, pre-populated with a configurable sequence of events.
 - journal_events: helper that appends events to the temp journal.
@@ -13,12 +14,17 @@ Provides:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+import os
+import sys
+from collections.abc import Callable, Generator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+# Force offscreen rendering for all Qt tests so no display is needed.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # ---------------------------------------------------------------------------
 # Root fixture directory (checked into the tree for deterministic data)
@@ -50,6 +56,16 @@ def _make_event(
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    yield app
+
 
 @pytest.fixture()
 def tmp_journal(tmp_path: Path) -> Path:

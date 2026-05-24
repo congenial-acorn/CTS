@@ -68,7 +68,8 @@ SAVE_PATH = BASE_DIR / "save.txt"
 
 def parse_version_tag(tag: str) -> int:
     cleaned_tag = tag.strip().lstrip("vV")
-    parts = cleaned_tag.split(".")
+    prerelease = cleaned_tag.split("-", 1)[0]
+    parts = prerelease.split(".")
     if len(parts) != 3 or not all(part.isdigit() for part in parts):
         raise ValueError(f"Invalid version tag: {tag}")
     return int("".join(parts))

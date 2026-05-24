@@ -32,6 +32,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Late import so the module is usable without the rest of CTS on sys.path.
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from TraversalSystem.window_manager import diagnose
 
     report = diagnose(target_fid=args.target_fid)
