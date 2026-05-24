@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportMissingModuleSource=false, reportImplicitRelativeImport=false
+
 import datetime
 import json
 import os
 import random
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, cast
 import urllib.error
 import urllib.request
 
@@ -18,18 +21,42 @@ import pyperclip
 import pytz
 import tzlocal
 
-from config import BASE_DIR, TraversalOptions, load_settings
-from discordhandler import DiscordHandler
-from journalwatcher import JournalWatcher
-from reshandler import Reshandler
-from platform_utils import (
-    get_screen_resolution,
-    open_steam_game,
-    system_shutdown,
-    get_game_process_names,
-    IS_WINDOWS,
-)
-import input_handler
+try:
+    from .config import BASE_DIR, TraversalOptions, load_settings
+    from .discordhandler import DiscordHandler
+    from .journalwatcher import JournalWatcher
+    from .reshandler import Reshandler
+    from .platform_utils import (
+        get_screen_resolution,
+        open_steam_game,
+        system_shutdown,
+        get_game_process_names,
+        IS_WINDOWS,
+    )
+    from . import input_handler
+    from .runtime.controller import (
+        TraversalController,
+        TraversalRuntimeContext,
+        TraversalStopped,
+    )
+except ImportError:
+    from config import BASE_DIR, TraversalOptions, load_settings  # type: ignore[reportMissingImports]
+    from discordhandler import DiscordHandler  # type: ignore[reportMissingImports]
+    from journalwatcher import JournalWatcher  # type: ignore[reportMissingImports]
+    from reshandler import Reshandler  # type: ignore[reportMissingImports]
+    from platform_utils import (  # type: ignore[reportMissingImports]
+        get_screen_resolution,
+        open_steam_game,
+        system_shutdown,
+        get_game_process_names,
+        IS_WINDOWS,
+    )
+    import input_handler  # type: ignore[reportMissingImports]
+    from runtime.controller import (  # type: ignore[reportMissingImports]
+        TraversalController,
+        TraversalRuntimeContext,
+        TraversalStopped,
+    )
 
 # Get the screen resolution in a cross-platform manner
 screen_width, screen_height = get_screen_resolution()
@@ -216,12 +243,19 @@ def jump_to_system(
     res_handler: Reshandler,
     journal_watcher: JournalWatcher,
     sequence_dir: Path,
-) -> Tuple[int, datetime.datetime]:
+    runtime_context: TraversalRuntimeContext | None = None,
+) -> Tuple[int, datetime.datetime | int]:
+    if runtime_context is not None:
+        runtime_context.raise_if_cancelled()
+
     if not options.auto_plot_jumps:
         pyperclip.copy(system_name.lower())
         print(f"alert:Please plot the jump to {system_name}. It has been copied to your clipboard.")
         while journal_watcher.last_carrier_request() != system_name:
-            time.sleep(1)
+            if runtime_context is not None:
+                runtime_context.wait(1)
+            else:
+                time.sleep(1)
 
         current_time = datetime.datetime.now(datetime.timezone.utc)
         departure_time_str = journal_watcher.departureTime
@@ -237,6 +271,9 @@ def jump_to_system(
         follow_button_sequence(sequence_dir, "squadron/jump_nav_1.txt")
     else:
         follow_button_sequence(sequence_dir, "jump_nav_1.txt")
+
+    if runtime_context is not None:
+        runtime_context.raise_if_cancelled()
 
     input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
     time.sleep(slight_random_time(0.1))
@@ -395,8 +432,35 @@ def open_game(
     state.game_ready = True
 
 
-def run_traversal(options: TraversalOptions) -> bool:
-    journal_watcher = JournalWatcher()
+def run_traversal(
+    options: TraversalOptions | Mapping[str, object],
+    *,
+    journal: object = None,
+    window: object = None,
+    focus: object = None,
+    cancel_event: threading.Event | None = None,
+    status_callback=None,
+    controller: TraversalController | None = None,
+) -> bool:
+    runtime_controller = controller or TraversalController()
+    return runtime_controller.run(
+        _run_traversal_slot,
+        options,
+        journal=journal,
+        window=window,
+        focus=focus,
+        cancel_event=cancel_event,
+        status_callback=status_callback,
+    )
+
+
+def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
+    options = runtime_context.options
+    journal_dependency = runtime_context.dependencies.journal
+    journal_watcher = cast(
+        JournalWatcher,
+        journal_dependency if journal_dependency is not None else JournalWatcher(),
+    )
     discord_messenger = DiscordHandler(single_message=options.single_discord_message)
     res_handler = Reshandler(screen_width, screen_height)
 
@@ -422,7 +486,7 @@ def run_traversal(options: TraversalOptions) -> bool:
         save_progress(state)
         progress_saved = True
 
-    time.sleep(5)
+    runtime_context.wait(5)
 
     try:
         try:
@@ -464,7 +528,7 @@ def run_traversal(options: TraversalOptions) -> bool:
 
         for countdown in range(5, 0, -1):
             print(f"Beginning in {countdown}...")
-            time.sleep(1)
+            runtime_context.wait(1)
 
         jumps_left = len(route_list) + 1
         final_line = route_list[-1]
@@ -486,11 +550,13 @@ def run_traversal(options: TraversalOptions) -> bool:
 
         done_first = False
         for idx, system in enumerate(route_list):
+            total_time = 0
             jumps_left -= 1
             if idx < state.line_no:
                 continue
 
-            time.sleep(3)
+            runtime_context.wait(3)
+            runtime_context.raise_if_cancelled()
 
             print(f"Next stop: {system}")
             print("Beginning navigation.")
@@ -499,13 +565,25 @@ def run_traversal(options: TraversalOptions) -> bool:
 
             try:
                 time_to_jump, departing_time = jump_to_system(
-                    system, options, res_handler, journal_watcher, SEQUENCE_DIR
+                    system,
+                    options,
+                    res_handler,
+                    journal_watcher,
+                    SEQUENCE_DIR,
+                    runtime_context,
                 )
 
                 while time_to_jump == 0 or departing_time == 0:
+                    runtime_context.raise_if_cancelled()
                     time_to_jump, departing_time = jump_to_system(
-                        system, options, res_handler, journal_watcher, SEQUENCE_DIR
+                        system,
+                        options,
+                        res_handler,
+                        journal_watcher,
+                        SEQUENCE_DIR,
+                        runtime_context,
                     )
+                assert isinstance(departing_time, datetime.datetime)
 
                 formatted_time = str(datetime.timedelta(seconds=time_to_jump))
                 departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
@@ -604,7 +682,9 @@ def run_traversal(options: TraversalOptions) -> bool:
                 )
 
             while total_time > 0:
+                runtime_context.transition("waiting")
                 print(f"Jump in {total_time:>4}s", end="\r", flush=True)
+                runtime_context.raise_if_cancelled()
                 time.sleep(1)
 
                 match total_time:
@@ -629,6 +709,7 @@ def run_traversal(options: TraversalOptions) -> bool:
 
                 total_time -= 1
             print()
+            runtime_context.transition("running")
 
             print("Jumping!")
 
@@ -641,7 +722,9 @@ def run_traversal(options: TraversalOptions) -> bool:
 
                 total_time = 60
                 while total_time > 0:
+                    runtime_context.transition("waiting")
                     print(total_time)
+                    runtime_context.raise_if_cancelled()
                     time.sleep(1)
                     total_time -= 1
 
@@ -650,6 +733,7 @@ def run_traversal(options: TraversalOptions) -> bool:
                 print("Counting down until next jump...")
                 total_time = 362
                 while total_time > 0:
+                    runtime_context.transition("waiting")
                     print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
                     match total_time:
@@ -662,6 +746,8 @@ def run_traversal(options: TraversalOptions) -> bool:
                                 print("\nPausing execution until jump is confirmed...")
                                 completed = False
                                 while not completed:
+                                    runtime_context.transition("waiting")
+                                    runtime_context.raise_if_cancelled()
                                     completed = journal_watcher.get_jumped()
                                     if not completed:
                                         print("Jump not complete...")
@@ -669,10 +755,13 @@ def run_traversal(options: TraversalOptions) -> bool:
                             else:
                                 print("\nPausing execution until game is open and ready...")
                                 while not state.game_ready:
+                                    runtime_context.transition("waiting")
+                                    runtime_context.raise_if_cancelled()
                                     print("Game not ready...")
                                     time.sleep(10)
                                 total_time = 152
                             print("Jump complete!")
+                            runtime_context.transition("running")
                             discord_messenger.update_fields(8, 7)
                         case 151:
                             discord_messenger.update_fields(8, 8)
@@ -690,6 +779,7 @@ def run_traversal(options: TraversalOptions) -> bool:
                     time.sleep(1)
                     total_time -= 1
                 print()
+                runtime_context.transition("running")
                 discord_messenger.update_fields(9, 9)
 
             done_first = True
@@ -721,6 +811,10 @@ def run_traversal(options: TraversalOptions) -> bool:
         print("\nTraversal interrupted. Saving progress before exiting...")
         maybe_save_progress()
         return False
+    except TraversalStopped:
+        print("\nTraversal cancelled. Saving progress before exiting...")
+        maybe_save_progress()
+        raise
     finally:
         maybe_save_progress()
 
