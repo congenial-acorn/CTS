@@ -499,7 +499,7 @@ class TestDefaultRouteDirectory:
         }
         p = _write_json(tmp_path, data)
         cfg = load_gui_config(p)
-        assert cfg.universal.default_route_directory == "/tmp/routes"
+        assert Path(cfg.universal.default_route_directory) == Path("/tmp/routes")
 
     def test_default_route_directory_empty_when_absent(self, tmp_path: Path):
         data = {"schema_version": 1, "universal": {}, "carrier_slots": []}
@@ -532,7 +532,7 @@ class TestDefaultRouteDirectory:
         out_path = tmp_path / "rt.json"
         save_gui_config(cfg, out_path)
         cfg2 = load_gui_config(out_path)
-        assert cfg2.universal.default_route_directory == "/custom/routes"
+        assert Path(cfg2.universal.default_route_directory) == Path("/custom/routes")
 
 
 # ===================================================================

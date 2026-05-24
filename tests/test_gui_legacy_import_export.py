@@ -172,7 +172,7 @@ class TestImportRouteFileResolution:
             "webhook_url=\njournal_directory=~\nroute_file=/absolute/route.txt\n",
         )
         cfg = import_legacy_settings(ini)
-        assert cfg.carrier_slots[0].route_file == "/absolute/route.txt"
+        assert Path(cfg.carrier_slots[0].route_file) == Path("/absolute/route.txt")
 
 
 class TestImportMissingFile:
