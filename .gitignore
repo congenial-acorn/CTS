@@ -20,3 +20,4 @@ __pycache__/
 *.exe
 TraversalSystem/route.txt
 lvenv/
+.codegraph
