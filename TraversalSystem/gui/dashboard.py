@@ -30,13 +30,56 @@ from TraversalSystem.gui.theme import ED_DARK_BG, ED_PANEL_BG, ED_ORANGE, ED_TEX
 # Manual Bind Dialog
 # ---------------------------------------------------------------------------
 
+class _CaptureWorker(QObject):
+    capture_result = Signal(int, object)
+    finished = Signal()
+
+    def __init__(
+        self,
+        candidates: list[WindowInfo],
+        max_size: tuple[int, int] = (320, 240),
+    ) -> None:
+        super().__init__()
+        self._candidates = candidates
+        self._max_size = max_size
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            for i, window in enumerate(self._candidates):
+                try:
+                    img = capture_window(window.handle, window.backend, self._max_size)
+                    if img is not None:
+                        img = img.convert("RGBA")
+                        data = img.tobytes("raw", "RGBA")
+                        qimg = QImage(
+                            data,
+                            img.width,
+                            img.height,
+                            img.width * 4,
+                            QImage.Format.Format_RGBA8888,
+                        ).copy()
+                        self.capture_result.emit(i, qimg)
+                    else:
+                        self.capture_result.emit(i, None)
+                except Exception:
+                    self.capture_result.emit(i, None)
+        finally:
+            self.finished.emit()
+
 class ManualBindDialog(QDialog):
     """Dialog for manually selecting a window for slot binding.
-    
-    Shows a simple list of candidate windows.
+
+    Shows thumbnail previews of candidate windows captured in a
+    background thread. Placeholders are shown until capture completes.
     """
 
     window_selected = Signal(object)
+
+    _THUMB_W = 160
+    _THUMB_H = 120
+    _GRID_W = 180
+    _GRID_H = 170
 
     def __init__(
         self,
@@ -52,7 +95,31 @@ class ManualBindDialog(QDialog):
         self.selected_window: WindowInfo | None = None
 
         self.setWindowTitle(f"Manual Bind - Slot {slot_index}")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(560)
+
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {ED_DARK_BG}; }}
+            QListWidget {{
+                background-color: {ED_PANEL_BG};
+                border: 1px solid {ED_BORDER};
+                color: {ED_TEXT};
+            }}
+            QListWidget::item:selected {{
+                background-color: {ED_ORANGE};
+                color: {ED_DARK_BG};
+            }}
+            QLabel {{ color: {ED_TEXT}; }}
+            QDialogButtonBox QPushButton {{
+                background-color: {ED_PANEL_BG};
+                color: {ED_ORANGE};
+                border: 1px solid {ED_ORANGE};
+                padding: 5px 15px;
+            }}
+            QDialogButtonBox QPushButton:hover {{
+                background-color: {ED_ORANGE};
+                color: {ED_DARK_BG};
+            }}
+        """)
 
         layout = QVBoxLayout(self)
 
@@ -62,11 +129,29 @@ class ManualBindDialog(QDialog):
         layout.addWidget(info_label)
 
         self.window_list = QListWidget()
+        self.window_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.window_list.setIconSize(QSize(self._THUMB_W, self._THUMB_H))
+        self.window_list.setGridSize(QSize(self._GRID_W, self._GRID_H))
+        self.window_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.window_list.setSpacing(10)
         self.window_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+        placeholder_img = create_placeholder(self._THUMB_W, self._THUMB_H)
+        ph_data = placeholder_img.convert("RGBA").tobytes("raw", "RGBA")
+        ph_qimg = QImage(
+            ph_data,
+            self._THUMB_W,
+            self._THUMB_H,
+            self._THUMB_W * 4,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        self._placeholder_icon = QIcon(QPixmap.fromImage(ph_qimg))
 
         for i, window in enumerate(candidate_windows):
             item = QListWidgetItem()
-            item.setText(f"{window.title} (PID: {window.pid})")
+            item.setIcon(self._placeholder_icon)
+            item.setText(f"{window.title}\nPID: {window.pid}")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.window_list.addItem(item)
 
@@ -81,6 +166,50 @@ class ManualBindDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
+        self._capture_thread: QThread | None = None
+        self._capture_worker: _CaptureWorker | None = None
+        self._start_capture_thread()
+
+    def _start_capture_thread(self) -> None:
+        if not self.candidate_windows:
+            return
+
+        self._capture_thread = QThread(self)
+        self._capture_worker = _CaptureWorker(
+            self.candidate_windows,
+            max_size=(self._THUMB_W * 2, self._THUMB_H * 2),
+        )
+        self._capture_worker.moveToThread(self._capture_thread)
+
+        self._capture_thread.started.connect(self._capture_worker.run)
+        self._capture_worker.capture_result.connect(self._on_thumbnail_ready)
+        self._capture_worker.finished.connect(self._capture_thread.quit)
+        self._capture_thread.finished.connect(self._cleanup_capture_thread)
+
+        self._capture_thread.start()
+
+    def _on_thumbnail_ready(self, index: int, qimage: QImage | None) -> None:
+        if qimage is None:
+            return
+
+        pixmap = QPixmap.fromImage(qimage).scaled(
+            self._THUMB_W,
+            self._THUMB_H,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        item = self.window_list.item(index)
+        if item is not None:
+            item.setIcon(QIcon(pixmap))
+
+    def _cleanup_capture_thread(self) -> None:
+        if self._capture_worker is not None:
+            self._capture_worker.deleteLater()
+            self._capture_worker = None
+        if self._capture_thread is not None:
+            self._capture_thread.deleteLater()
+            self._capture_thread = None
+
     def _on_accept(self) -> None:
         row = self.window_list.currentRow()
         if row >= 0 and row < len(self.candidate_windows):
@@ -93,6 +222,12 @@ class ManualBindDialog(QDialog):
                 "No Selection",
                 "Please select a window from the list.",
             )
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            self._capture_thread.quit()
+            self._capture_thread.wait(2000)
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------

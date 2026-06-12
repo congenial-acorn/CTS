@@ -23,6 +23,12 @@ import pytest
 def mock_qdialog_exec(monkeypatch):
     from PySide6.QtWidgets import QDialog
     monkeypatch.setattr(QDialog, "exec", lambda self: 1)
+    import TraversalSystem.window_capture as wc
+    import TraversalSystem.gui.dashboard as dashboard_module
+
+    monkeypatch.setattr(wc, "capture_window", lambda *a, **k: None)
+    monkeypatch.setattr(dashboard_module, "capture_window", lambda *a, **k: None)
+    monkeypatch.setattr(dashboard_module.ManualBindDialog, "_start_capture_thread", lambda self: None)
 
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QComboBox, QListWidget
@@ -675,8 +681,8 @@ def test_manual_bind_flow(qapp, config, binding_controller, worker_controller, w
 
 
 
-class TestManualBindDialog:
-    def test_dialog_creates_items(
+class TestManualBindDialogThumbnails:
+    def test_dialog_creates_icon_mode_items(
         self, qapp, config, binding_controller, worker_controller, window_info
     ):
         from TraversalSystem.gui.dashboard import ManualBindDialog
@@ -688,14 +694,49 @@ class TestManualBindDialog:
             parent=None,
         )
 
+        assert dialog.window_list.viewMode() == QListWidget.ViewMode.IconMode
         assert dialog.window_list.count() == 1
         item = dialog.window_list.item(0)
         assert item is not None
-        assert str(window_info.pid) in item.text()
-        assert window_info.title in item.text()
+        assert not item.icon().isNull()
 
         idx = item.data(Qt.ItemDataRole.UserRole)
         assert idx == 0
+
+        dialog.close()
+
+    def test_dialog_text_includes_pid(
+        self, qapp, config, binding_controller, worker_controller, window_info
+    ):
+        from TraversalSystem.gui.dashboard import ManualBindDialog
+
+        dialog = ManualBindDialog(
+            slot_index=0,
+            fid="F123",
+            candidate_windows=[window_info],
+            parent=None,
+        )
+
+        item = dialog.window_list.item(0)
+        assert str(window_info.pid) in item.text()
+        assert window_info.title in item.text()
+
+        dialog.close()
+
+    def test_placeholder_shown_when_capture_fails(
+        self, qapp, config, binding_controller, worker_controller, window_info
+    ):
+        from TraversalSystem.gui.dashboard import ManualBindDialog
+
+        dialog = ManualBindDialog(
+            slot_index=0,
+            fid="F123",
+            candidate_windows=[window_info],
+            parent=None,
+        )
+
+        item = dialog.window_list.item(0)
+        assert not item.icon().isNull()
 
         dialog.close()
 
