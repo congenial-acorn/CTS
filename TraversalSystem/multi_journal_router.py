@@ -1,8 +1,7 @@
 """Multi-file journal router for Elite Dangerous carrier traversal.
 
-Replaces the single-file ``JournalWatcher`` with a directory-scanning router
-that tails every ``Journal*.log`` file by byte offset, buffers partial lines,
-and routes carrier state per commander FID.
+Directory-scanning router that tails every ``Journal*.log`` file by byte
+offset, buffers partial lines, and routes carrier state per commander FID.
 
 Identity is established exclusively from ``Commander`` / ``LoadGame`` events.
 No filename-based routing or whole-file snapshots are used.
@@ -32,6 +31,7 @@ class FileTailState:
     active: bool = True
     saw_shutdown: bool = False
     expecting_continued: bool = False
+    identity_error: str | None = None
     last_timestamp: str | None = None
     last_mtime_ns: int = 0
 
@@ -141,7 +141,25 @@ class MultiJournalRouter:
 
     # -- internal -----------------------------------------------------------
 
+    @staticmethod
+    def _fid_mismatch(file_state: FileTailState, new_fid: str | None, source: str) -> bool:
+        if (
+            file_state.fid
+            and new_fid
+            and new_fid != file_state.fid
+        ):
+            file_state.identity_error = (
+                f"{source} FID {new_fid!r} conflicts with "
+                f"established {file_state.fid!r}"
+            )
+            file_state.active = False
+            return True
+        return False
+
     def _handle_event(self, file_state: FileTailState, evt: dict[str, Any]) -> None:
+        if file_state.identity_error:
+            return
+
         event_name = evt.get("event")
         if not event_name:
             return
@@ -156,13 +174,20 @@ class MultiJournalRouter:
             return  # no commander state to update
 
         if event_name == "Commander":
+            new_fid = evt.get("FID")
+            if self._fid_mismatch(file_state, new_fid, "Commander"):
+                return
             file_state.commander_name = evt.get("Name")
-            file_state.fid = evt.get("FID")
+            file_state.fid = new_fid
         elif event_name == "LoadGame":
+            new_fid = evt.get("FID")
+            if self._fid_mismatch(file_state, new_fid, "LoadGame"):
+                return
             file_state.commander_name = evt.get(
                 "Commander", file_state.commander_name,
             )
-            file_state.fid = evt.get("FID", file_state.fid)
+            if new_fid is not None:
+                file_state.fid = new_fid
         elif event_name == "Shutdown":
             file_state.saw_shutdown = True
             file_state.active = False
@@ -217,8 +242,8 @@ class MultiJournalRouter:
 class CTSJournalFacade:
     """Read-only view over the router for a single target commander.
 
-    This is the interface that traversal code should use instead of touching
-    ``JournalWatcher`` globals directly.
+    This is the interface that traversal code should use for per-commander
+    journal state.
     """
 
     def __init__(self, router: MultiJournalRouter, target_fid: str) -> None:

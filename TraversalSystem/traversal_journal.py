@@ -1,89 +1,60 @@
 """Journal abstraction layer for the CTS traversal system.
 
 Provides:
-- ``LegacyJournalFacade``: adapter wrapping ``JournalWatcher`` with the same
-  read-only interface as ``CTSJournalFacade``.
 - ``JournalScanLoop``: background polling thread that drives
   ``MultiJournalRouter.scan_once`` on a 1-second interval.
 
-These classes are extracted from ``main.py`` so that integration tests can
-import them without pulling in third-party GUI dependencies (pyautogui, etc.).
+This class is extracted from ``main.py`` so that integration tests can
+import it without pulling in third-party GUI dependencies (pyautogui, etc.).
 """
 from __future__ import annotations
 
+import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Protocol, runtime_checkable
 
-from .multi_journal_router import MultiJournalRouter
+logger = logging.getLogger(__name__)
 
 
-class LegacyJournalFacade:
-    """Adapter that presents the same read interface as ``CTSJournalFacade``
-    but delegates to a legacy ``JournalWatcher`` instance.
-
-    This lets the traversal loop call a uniform ``last_carrier_request()``,
-    ``departure_time()``, ``has_jumped()``, ``reset_jump()`` API regardless
-    of whether multicarrier mode is active.
-
-    ``JournalWatcher`` is imported lazily inside ``__init__`` to avoid pulling
-    in third-party dependencies when only ``JournalScanLoop`` is needed.
-    """
-
-    def __init__(self, watcher: Any) -> None:
-        from .journalwatcher import JournalWatcher
-        self._watcher: JournalWatcher = watcher
-
-    def state(self) -> Any:
-        return None
-
-    def last_carrier_request(self) -> str | None:
-        try:
-            result = self._watcher.last_carrier_request()
-        except AttributeError:
-            return None
-        return result if result else None
-
-    def departure_time(self) -> str | None:
-        dt = self._watcher.departureTime
-        return dt if dt else None
-
-    def has_jumped(self) -> bool:
-        try:
-            return self._watcher.get_jumped()
-        except AttributeError:
-            return False
-
-    def reset_jump(self) -> None:
-        self._watcher.reset_jump()
-
-    def jump_cancelled(self) -> bool:
-        """Legacy watcher has no cancel tracking; always False."""
-        return False
-
-    def reset_cancel(self) -> None:
-        """No-op for legacy watcher."""
-
-    def last_fuel(self) -> float | None:
-        """Return the last known fuel level from the watcher."""
-        try:
-            return float(self._watcher.lastFuel)
-        except (AttributeError, TypeError, ValueError):
-            return None
+@runtime_checkable
+class _ScanOnce(Protocol):
+    def scan_once(self, journal_dir: Path) -> None: ...
 
 
 class JournalScanLoop:
     """Background thread that polls the journal directory on a 1-second
     interval using ``MultiJournalRouter.scan_once``.
 
-    In multicarrier mode the scan loop replaces the old
-    ``start_journal_thread`` / ``JournalWatcher`` lifecycle entirely.
-    In legacy mode the old ``start_journal_thread`` path is kept unchanged.
+    Args:
+        router: A ``MultiJournalRouter`` (or any ``_ScanOnce``-compatible)
+            instance to drive.
+        journal_dir: Path to the journal directory to scan.
+        error_callback: Optional callable invoked with the ``Exception``
+            instance whenever ``scan_once`` raises.  When *None*, errors
+            are logged via the module logger at warning level.  Supply a
+            callback in production to centralise error reporting (e.g.
+            recording into a GUI status buffer).
+        fail_fast: When *True*, the first ``scan_once`` exception causes
+            the loop thread to exit immediately.  When *False* (the
+            default), the loop continues polling after reporting the error
+            through the callback — preserving the original production
+            continuation semantics.
     """
 
-    def __init__(self, router: MultiJournalRouter, journal_dir: Path) -> None:
-        self.router: MultiJournalRouter = router
+    def __init__(
+        self,
+        router: _ScanOnce,
+        journal_dir: Path,
+        *,
+        error_callback: Callable[[Exception], None] | None = None,
+        fail_fast: bool = False,
+    ) -> None:
+        self.router: _ScanOnce = router
         self.journal_dir: Path = journal_dir
+        self._error_callback: Callable[[Exception], None] | None = error_callback
+        self._fail_fast: bool = fail_fast
         self._stop: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -99,7 +70,12 @@ class JournalScanLoop:
         while not self._stop.is_set():
             try:
                 self.router.scan_once(self.journal_dir)
-            except Exception:
-                pass  # keep polling; caller handles critical errors separately
+            except Exception as exc:
+                if self._error_callback is not None:
+                    self._error_callback(exc)
+                else:
+                    logger.warning("Journal scan_once error: %s", exc)
+                if self._fail_fast:
+                    break
             _ = self._stop.wait(1.0)
         print("Journal scan loop halted")

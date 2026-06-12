@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from TraversalSystem.config import TraversalOptions
 from TraversalSystem.gui.binding_controller import BindingSnapshot, SlotClassification
-from TraversalSystem.gui.worker_controller import SlotRuntimeRecord, WorkerController
+from TraversalSystem.gui.worker_controller import JournalRuntime, SlotRuntimeRecord, WorkerController
 from TraversalSystem.gui.worker_state import FailureKind, SlotFailure, WorkerState
 from TraversalSystem.gui_config import CarrierSlotConfig, GuiConfig, UniversalSettings
 from TraversalSystem.runtime.controller import StatusCallback
@@ -153,9 +153,6 @@ def test_single_slot_success_emits_status_and_injected_dependencies(
 
     controller = WorkerController(
         traversal_runner=traversal_runner,
-        journal_dependency_factory=lambda universal: {
-            "journal_dir": universal.journal_directory,
-        },
         focus_dependency_factory=lambda binding, universal: {
             "binding": binding,
             "timeout": universal.focus_timeout_seconds,
@@ -193,7 +190,10 @@ def test_single_slot_success_emits_status_and_injected_dependencies(
     assert isinstance(options, TraversalOptions)
     assert options.target_fid == "FID-0"
     assert options.multi_commander_enabled is True
-    assert seen["journal"] == {"journal_dir": config.universal.journal_directory}
+    from TraversalSystem.multi_journal_router import CTSJournalFacade
+    journal_dep = seen["journal"]
+    assert isinstance(journal_dep, CTSJournalFacade)
+    assert journal_dep.target_fid == "FID-0"
     assert seen["window"] == bindings[0].window_binding
     assert seen["focus"] == {
         "binding": bindings[0].window_binding,
@@ -726,3 +726,151 @@ def test_controller_shutdown_cancels_waiting_and_active_queue_workers(
     assert failures == []
     assert _queue_worker_is_alive(sequence_queue) is False
     _wait_for_controller_idle(qapp, controller, [0, 1])
+
+
+# ---------------------------------------------------------------------------
+# Regression: journal dependency should be a per-slot facade, NOT a raw Path
+# ---------------------------------------------------------------------------
+
+def test_worker_controller_builds_target_fid_facade(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """The journal_dependency injected into the traversal runner MUST be a
+    per-slot facade object (CTSJournalFacade or equivalent) that carries
+    the slot's target_fid — NOT a bare ``Path``.
+
+    This test exposes the production bug where
+    ``default_journal_dependency_factory`` returns
+    ``Path(universal.journal_directory)`` and the controller shares a
+    single ``Path`` across all slots via ``_get_shared_journal_dependency``.
+
+    After the fix the factory should return a facade whose ``target_fid``
+    matches the slot's configured FID.
+    """
+    _ = qapp
+    config, bindings = _config(tmp_path, 1)
+    seen_journal: list[object] = []
+
+    def traversal_runner(
+        options: TraversalOptions,
+        *,
+        journal: object = None,
+        window: object = None,
+        focus: object = None,
+        sequence_queue: object = None,
+        cancel_event: threading.Event | None = None,
+        status_callback: Callable[..., None] | None = None,
+        slot_id: int | None = None,
+    ) -> bool:
+        seen_journal.append(journal)
+        assert status_callback is not None
+        status_callback("running")
+        status_callback("complete")
+        return True
+
+    controller = WorkerController(traversal_runner=traversal_runner)
+    controller.sync_slots(config, bindings)
+
+    assert controller.start_slot(0) is True
+    _wait_until(qapp, lambda: controller.slot_state(0) is WorkerState.COMPLETE)
+
+    assert len(seen_journal) == 1
+    journal_dep = seen_journal[0]
+
+    # BUG: Production returns a Path, not a facade.  The fix must ensure
+    # the dependency is a facade-like object with a target_fid attribute.
+    assert not isinstance(journal_dep, Path), (
+        "journal_dependency must NOT be a raw Path; it should be a per-slot "
+        "facade/runtime object with target_fid isolation"
+    )
+
+    # The facade must know the slot's target FID.
+    assert hasattr(journal_dep, "target_fid"), (
+        "journal_dependency must have a 'target_fid' attribute for per-slot "
+        "commander isolation"
+    )
+    assert getattr(journal_dep, "target_fid") == "FID-0", (
+        "journal_dependency.target_fid must match the slot's configured FID"
+    )
+
+    _wait_for_controller_idle(qapp, controller, [0])
+    controller.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# Regression: two slots must isolate by configured FID
+# ---------------------------------------------------------------------------
+
+def test_two_slots_share_router_but_isolate_fids(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """Two slots sharing the same WorkerController must receive distinct
+    journal dependencies, each scoped to the slot's own ``target_fid``.
+
+    This test exposes the production bug where
+    ``_get_shared_journal_dependency`` caches a single dependency object
+    and returns the same instance for every slot, making it impossible to
+    isolate commanders.
+    """
+    _ = qapp
+    config, bindings = _config(tmp_path, 2)
+    seen_journals: dict[int, object] = {}
+    finished: list[tuple[int, bool]] = []
+    barrier = threading.Barrier(2, timeout=5.0)
+
+    def traversal_runner(
+        options: TraversalOptions,
+        *,
+        journal: object = None,
+        window: object = None,
+        focus: object = None,
+        sequence_queue: object = None,
+        cancel_event: threading.Event | None = None,
+        status_callback: Callable[..., None] | None = None,
+        slot_id: int | None = None,
+    ) -> bool:
+        assert slot_id is not None
+        seen_journals[slot_id] = journal
+        _ = barrier.wait(timeout=5.0)
+        assert status_callback is not None
+        status_callback("complete")
+        return True
+
+    controller = WorkerController(traversal_runner=traversal_runner)
+    controller.sync_slots(config, bindings)
+
+    def on_finished(slot_index: int, success: bool) -> None:
+        finished.append((slot_index, success))
+
+    _ = controller.slot_finished.connect(on_finished)
+
+    assert controller.start_all_ready()[0] == [0, 1]
+    _wait_until(qapp, lambda: sorted(finished) == [(0, True), (1, True)])
+
+    assert len(seen_journals) == 2
+
+    # Each slot's journal dependency must carry its own FID.
+    j0 = seen_journals[0]
+    j1 = seen_journals[1]
+
+    assert hasattr(j0, "target_fid"), (
+        "Slot 0 journal_dependency must have 'target_fid'"
+    )
+    assert hasattr(j1, "target_fid"), (
+        "Slot 1 journal_dependency must have 'target_fid'"
+    )
+    fid0 = getattr(j0, "target_fid")
+    fid1 = getattr(j1, "target_fid")
+    assert fid0 == "FID-0", f"Slot 0 target_fid must be FID-0, got {fid0!r}"
+    assert fid1 == "FID-1", f"Slot 1 target_fid must be FID-1, got {fid1!r}"
+
+    # Dependencies must be separate objects (no shared singleton).
+    assert j0 is not j1, (
+        "Each slot must receive a distinct journal dependency instance "
+        "to prevent cross-slot state leakage"
+    )
+
+    _wait_for_controller_idle(qapp, controller, [0, 1])
+    controller.shutdown(wait=True)

@@ -5,7 +5,6 @@ Covers:
 - Startup readiness waits for commander discovery, NOT for CarrierJumpRequest
 - Scan loop updates selected-commander state when new journal events appear
 - Power-saving reopen reuses target_fid state after a new journal file appears
-- LegacyJournalFacade correctly wraps JournalWatcher
 - JournalScanLoop start/stop lifecycle
 """
 from __future__ import annotations
@@ -15,6 +14,7 @@ from __future__ import annotations
 import datetime
 import importlib
 import json
+import logging
 import sys
 import threading
 import time
@@ -38,7 +38,6 @@ from TraversalSystem.runtime.controller import (
 )
 from TraversalSystem.traversal_journal import (
     JournalScanLoop,
-    LegacyJournalFacade,
 )
 from TraversalSystem.window_manager import WindowBinding, WindowBindingCoordinator, WindowInfo
 
@@ -323,48 +322,6 @@ class TestLostWindowInvalidatesBinding:
             ambiguous_window_policy="abort",
         ) is None
 
-
-# ---------------------------------------------------------------------------
-# LegacyJournalFacade unit tests
-# ---------------------------------------------------------------------------
-
-class TestLegacyJournalFacade:
-    """LegacyJournalFacade wraps JournalWatcher with the same interface as
-    CTSJournalFacade.
-    """
-
-    def test_delegates_last_carrier_request(self) -> None:
-        from TraversalSystem.journalwatcher import JournalWatcher
-
-        watcher = JournalWatcher()
-        facade = LegacyJournalFacade(watcher)
-
-        # JournalWatcher defaults to empty string; facade returns None.
-        assert facade.last_carrier_request() is None
-
-    def test_delegates_departure_time(self) -> None:
-        from TraversalSystem.journalwatcher import JournalWatcher
-
-        watcher = JournalWatcher()
-        facade = LegacyJournalFacade(watcher)
-
-        # Default departureTime is empty string; facade returns None.
-        assert facade.departure_time() is None
-
-    def test_delegates_has_jumped(self) -> None:
-        from TraversalSystem.journalwatcher import JournalWatcher
-
-        watcher = JournalWatcher()
-        facade = LegacyJournalFacade(watcher)
-
-        assert facade.has_jumped() is False
-
-    def test_delegates_reset_jump(self) -> None:
-        from TraversalSystem.journalwatcher import JournalWatcher
-
-        watcher = JournalWatcher()
-        facade = LegacyJournalFacade(watcher)
-        facade.reset_jump()  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +667,8 @@ def _run_restock_cycle(
     jump_calls = 0
 
     journal = MagicMock()
-    journal.get_jumped.return_value = True
+    journal.has_jumped.return_value = True
+    journal.jump_cancelled.return_value = False
 
     def fake_jump_to_system(*_args: object, **_kwargs: object) -> tuple[int, datetime.datetime]:
         nonlocal jump_calls
@@ -738,8 +696,7 @@ def _run_restock_cycle(
          patch.object(main, "DiscordHandler", return_value=MagicMock()), \
          patch.object(main, "Reshandler", _FakeResHandler), \
          patch.object(main, "load_route_list", return_value=["A", "B"]), \
-         patch.object(main, "latest_journal_path", return_value=tmp_path / "Journal.log"), \
-         patch.object(main, "start_journal_thread"), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
          patch.object(main, "consume_save", return_value=None), \
          patch.object(main, "save_progress"), \
          patch.object(main, "jump_to_system", side_effect=fake_jump_to_system), \
@@ -796,7 +753,8 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
         queue = _FakeSequenceQueue()
         created_queues.append(queue)
         journal = MagicMock()
-        journal.get_jumped.return_value = True
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.return_value = False
         results = list(jump_results)
 
         def fake_jump_to_system(*_args: object, **_kwargs: object) -> tuple[int, datetime.datetime]:
@@ -818,8 +776,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
              patch.object(main, "DiscordHandler", return_value=MagicMock()), \
              patch.object(main, "Reshandler", _FakeResHandler), \
              patch.object(main, "load_route_list", return_value=["A", "B"]), \
-             patch.object(main, "latest_journal_path", return_value=tmp_path / "Journal.log"), \
-             patch.object(main, "start_journal_thread"), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
              patch.object(main, "consume_save", return_value=None), \
              patch.object(main, "save_progress"), \
              patch.object(main, "jump_to_system", side_effect=fake_jump_to_system), \
@@ -1757,3 +1714,624 @@ def test_deadline_gating_defers_restock_until_after_jump() -> None:
 
 def test_two_slots_independent_progress_tracking() -> None:
     TestTwoCarrierSerializationIntegration().test_two_slots_independent_progress_tracking()
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Observable scan-loop exception handling
+# ---------------------------------------------------------------------------
+
+class _ExplodingRouter:
+    """Router double whose ``scan_once`` always raises.
+
+    Used to exercise ``JournalScanLoop`` error-callback and fail-fast
+    behaviour without touching the real filesystem.
+    """
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("scan_once kaboom")
+        self.scan_count = 0
+
+    def scan_once(self, journal_dir: Path) -> None:
+        self.scan_count += 1
+        raise self._exc
+
+
+class TestScanLoopExceptionHandling:
+    """Replace silent exception swallowing with observable failure behaviour.
+
+    Two modes are exercised:
+    1. **Production continuation** (``fail_fast=False``): the callback is
+       invoked for every scan error and the loop keeps polling.
+    2. **Fail-fast** (``fail_fast=True``): the first scan error causes the
+       loop thread to exit after invoking the callback exactly once.
+    """
+
+    def test_error_callback_captures_exception_when_fail_fast_false(
+        self, tmp_path: Path,
+    ) -> None:
+        router = _ExplodingRouter(RuntimeError("boom-A"))
+        captured: list[Exception] = []
+
+        loop = JournalScanLoop(
+            router,
+            tmp_path,
+            error_callback=captured.append,
+            fail_fast=False,
+        )
+
+        loop.start()
+        try:
+            # Give the loop time to perform several scan attempts.
+            deadline = time.monotonic() + 4
+            while len(captured) < 3 and time.monotonic() < deadline:
+                time.sleep(0.1)
+        finally:
+            loop.stop()
+
+        # The callback was invoked at least 3 times with the real exception.
+        assert len(captured) >= 3
+        for exc in captured:
+            assert isinstance(exc, RuntimeError)
+            assert "boom-A" in str(exc)
+
+    def test_fail_fast_causes_thread_exit_on_first_exception(
+        self, tmp_path: Path,
+    ) -> None:
+        """With ``fail_fast=True``, the first ``scan_once`` exception causes
+        the loop thread to exit after invoking the callback exactly once.
+        """
+        router = _ExplodingRouter()
+        captured: list[Exception] = []
+
+        loop = JournalScanLoop(
+            router,
+            tmp_path,
+            error_callback=captured.append,
+            fail_fast=True,
+        )
+
+        thread = loop._thread  # noqa: SLF001 — intentional for test
+        loop.start()
+        thread = loop._thread  # type: ignore[assignment]  # noqa: SLF001
+        assert thread is not None
+
+        # Thread should exit promptly (within a few seconds).
+        thread.join(timeout=5)
+        assert not thread.is_alive(), (
+            "Scan-loop thread should have exited after first exception "
+            "when fail_fast=True"
+        )
+
+        # Callback invoked exactly once.
+        assert len(captured) == 1
+        assert isinstance(captured[0], RuntimeError)
+
+        # scan_once was called exactly once.
+        assert router.scan_count == 1
+
+    def test_default_callback_logs_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        router = _ExplodingRouter(ValueError("log-me"))
+
+        with caplog.at_level(logging.WARNING, logger="TraversalSystem.traversal_journal"):
+            loop = JournalScanLoop(
+                router,
+                tmp_path,
+                fail_fast=True,
+            )
+
+            loop.start()
+            thread = loop._thread  # type: ignore[assignment]  # noqa: SLF001
+            assert thread is not None
+            thread.join(timeout=5)
+
+        assert router.scan_count >= 1
+        assert any("log-me" in record.message for record in caplog.records)
+
+    def test_no_silent_exception_swallowing(
+        self, tmp_path: Path,
+    ) -> None:
+        """Ensures there is no silent ``except Exception: pass`` remaining.
+
+        Uses a counting callback to prove that every scan_once error is
+        observable — either through the callback or via fail-fast exit.
+        """
+        router = _ExplodingRouter()
+        observed_errors: list[str] = []
+
+        loop = JournalScanLoop(
+            router,
+            tmp_path,
+            error_callback=lambda e: observed_errors.append(str(e)),
+            fail_fast=False,
+        )
+
+        loop.start()
+        try:
+            deadline = time.monotonic() + 3
+            while len(observed_errors) < 2 and time.monotonic() < deadline:
+                time.sleep(0.1)
+        finally:
+            loop.stop()
+
+        # At least 2 errors were observed — no silent swallowing.
+        assert len(observed_errors) >= 2
+        assert all("scan_once kaboom" in msg for msg in observed_errors)
+
+
+# ---------------------------------------------------------------------------
+# Regression: multicommander traversal must NOT start the legacy journal thread
+# ---------------------------------------------------------------------------
+
+def test_multicommander_traversal_does_not_start_legacy_journal_thread(
+    tmp_path: Path,
+) -> None:
+    """When a ``CTSJournalFacade`` is provided as the journal dependency,
+    ``_run_traversal_slot`` runs to completion without any legacy journal
+    thread machinery.
+
+    The production code no longer has ``start_journal_thread`` — this test
+    confirms the facade-driven path works end-to-end with no legacy artifacts.
+    """
+    import logging
+
+    main = _load_main_with_mocks(tmp_path)
+
+    route_file = tmp_path / "route.txt"
+    _ = route_file.write_text("Sol\nDeciat\n", encoding="utf-8")
+
+    facade = MagicMock(spec=CTSJournalFacade)
+    facade.has_jumped.return_value = True
+    facade.last_carrier_request.return_value = None
+    facade.departure_time.return_value = None
+    facade.jump_cancelled.return_value = False
+
+    queue = _FakeSequenceQueue()
+
+    options = TraversalOptions(
+        webhook_url="",
+        journal_directory=tmp_path,
+        route_file=route_file,
+        route_position=0,
+        tritium_slot=0,
+        auto_plot_jumps=True,
+        disable_refuel=False,
+        power_saving=False,
+        refuel_mode=0,
+        single_discord_message=False,
+        shutdown_on_complete=False,
+        multi_commander_enabled=True,
+        target_fid="F-MC-REGRESS",
+    )
+
+    cancel = threading.Event()
+    context = _make_runtime_context(
+        options=options,
+        sequence_queue=queue,
+        journal=facade,
+        slot_id=0,
+        sleep=lambda _s: None,
+        cancel_event=cancel,
+    )
+
+    jump_calls = 0
+
+    def fake_jump(*_a: object, **_kw: object) -> tuple[int, datetime.datetime]:
+        nonlocal jump_calls
+        jump_calls += 1
+        if jump_calls > 1:
+            raise KeyboardInterrupt
+        return 7, datetime.datetime.now(datetime.timezone.utc)
+
+    assert not hasattr(main, "start_journal_thread"), (
+        "start_journal_thread must not exist in production main.py"
+    )
+
+    with patch("builtins.print"), \
+         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+         patch.object(main, "Reshandler", _FakeResHandler), \
+         patch.object(main, "load_route_list", return_value=["A", "B"]), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+         patch.object(main, "consume_save", return_value=None), \
+         patch.object(main, "save_progress"), \
+         patch.object(main, "jump_to_system", side_effect=fake_jump), \
+         patch.object(main, "restock_tritium"), \
+         patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+         patch.object(main, "time") as fake_time:
+        fake_time.monotonic.side_effect = time.monotonic
+        fake_time.sleep.side_effect = lambda _s: None
+        try:
+            _ = main._run_traversal_slot(context)
+        except SystemExit:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Task 6: CLI facade / scan-loop tests
+# ---------------------------------------------------------------------------
+
+class TestCLIFacadeRequiresTargetFid:
+    """CLI main() must fail fast when target_fid is missing or unknown."""
+
+    def test_target_fid_required_for_journal_traversal(self, tmp_path: Path) -> None:
+        main = _load_main_with_mocks(tmp_path)
+
+        route_file = tmp_path / "route.txt"
+        _ = route_file.write_text("Sol\n", encoding="utf-8")
+
+        options_no_fid = TraversalOptions(
+            webhook_url="",
+            journal_directory=tmp_path,
+            route_file=route_file,
+            target_fid="",
+            multi_commander_enabled=False,
+        )
+
+        with patch("builtins.print") as mock_print, \
+             patch.object(main, "warn_if_outdated"), \
+             patch.object(main, "load_settings", return_value=options_no_fid), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(1))}), \
+             pytest.raises(SystemExit) as exc_info:
+            main.main()
+
+        assert exc_info.value.code == 1
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "target_fid" in printed
+
+    def test_unknown_target_fid_fails_before_automation(self, tmp_path: Path) -> None:
+        main = _load_main_with_mocks(tmp_path)
+
+        route_file = tmp_path / "route.txt"
+        _ = route_file.write_text("Sol\n", encoding="utf-8")
+
+        options_unknown_fid = TraversalOptions(
+            webhook_url="",
+            journal_directory=tmp_path,
+            route_file=route_file,
+            target_fid="F-UNKNOWN",
+            multi_commander_enabled=True,
+        )
+
+        scan_loop_started: list[object] = []
+
+        def tracking_start(self: JournalScanLoop) -> None:
+            scan_loop_started.append(True)
+
+        with patch("builtins.print") as mock_print, \
+             patch.object(main, "warn_if_outdated"), \
+             patch.object(main, "load_settings", return_value=options_unknown_fid), \
+             patch.object(JournalScanLoop, "start", tracking_start), \
+             patch.object(main, "run_traversal") as mock_run, \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(1))}), \
+             pytest.raises(SystemExit) as exc_info:
+            main.main()
+
+        assert exc_info.value.code == 1
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "not found" in printed
+        assert len(scan_loop_started) == 0, "Scan loop must NOT start for unknown FID"
+        mock_run.assert_not_called()
+
+
+class TestCLIScanLoopObservesEventsAfterStartup:
+    """After successful CLI preflight, the scan loop must observe new events."""
+
+    def test_cli_scan_loop_updates_after_startup(self, tmp_path: Path) -> None:
+        main = _load_main_with_mocks(tmp_path)
+
+        journal = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(journal, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-CLI", Name="CLICmdr"),
+        ])
+
+        route_file = tmp_path / "route.txt"
+        _ = route_file.write_text("Sol\nDeciat\n", encoding="utf-8")
+
+        options = TraversalOptions(
+            webhook_url="",
+            journal_directory=tmp_path,
+            route_file=route_file,
+            target_fid="F-CLI",
+            multi_commander_enabled=True,
+        )
+
+        captured_facade: list[object] = []
+        captured_loop: list[object] = []
+
+        def fake_run_traversal(
+            opts: object, *,
+            journal: object = None,
+            **_kwargs: object,
+        ) -> bool:
+            captured_facade.append(journal)
+            return True
+
+        real_scan_loop_stop = JournalScanLoop.stop
+
+        def tracking_stop(self: JournalScanLoop) -> None:
+            captured_loop.append(self)
+            real_scan_loop_stop(self)
+
+        with patch("builtins.print"), \
+             patch.object(main, "warn_if_outdated"), \
+             patch.object(main, "load_settings", return_value=options), \
+             patch.object(main, "run_traversal", side_effect=fake_run_traversal), \
+             patch.object(JournalScanLoop, "stop", tracking_stop), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(0))}), \
+             pytest.raises(SystemExit) as exc_info:
+            main.main()
+
+        assert exc_info.value.code == 0
+        assert len(captured_facade) == 1
+        facade = captured_facade[0]
+        assert isinstance(facade, CTSJournalFacade)
+        assert facade.target_fid == "F-CLI"
+        st = facade.state()
+        assert st is not None
+        assert st.commander_name == "CLICmdr"
+
+        assert len(captured_loop) == 1, "Scan loop must be stopped after traversal"
+
+
+class TestCLIScanLoopStopsOnAllExitPaths:
+    """Scan loop is stopped on success, failure, and cancellation."""
+
+    def test_cli_scan_loop_stops_on_failure(self, tmp_path: Path) -> None:
+        main = _load_main_with_mocks(tmp_path)
+
+        journal = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(journal, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-FAIL", Name="FailCmdr"),
+        ])
+
+        route_file = tmp_path / "route.txt"
+        _ = route_file.write_text("Sol\n", encoding="utf-8")
+
+        options = TraversalOptions(
+            webhook_url="",
+            journal_directory=tmp_path,
+            route_file=route_file,
+            target_fid="F-FAIL",
+            multi_commander_enabled=True,
+        )
+
+        captured_loop: list[object] = []
+
+        def fail_traversal(
+            opts: object, *,
+            journal: object = None,
+            **_kwargs: object,
+        ) -> bool:
+            return False
+
+        real_scan_loop_stop = JournalScanLoop.stop
+
+        def tracking_stop(self: JournalScanLoop) -> None:
+            captured_loop.append(self)
+            real_scan_loop_stop(self)
+
+        with patch("builtins.print"), \
+             patch.object(main, "warn_if_outdated"), \
+             patch.object(main, "load_settings", return_value=options), \
+             patch.object(main, "run_traversal", side_effect=fail_traversal), \
+             patch.object(JournalScanLoop, "stop", tracking_stop), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(1))}), \
+             pytest.raises(SystemExit) as exc_info:
+            main.main()
+
+        assert exc_info.value.code == 1
+        assert len(captured_loop) == 1, "Scan loop must be stopped even on failure"
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Fail-safe jump cancellation handling
+# ---------------------------------------------------------------------------
+
+class TestJumpCancellationHandling:
+    """During countdown and jump-completion wait, target-facade jump_cancelled()
+    causes deterministic failure handling.
+
+    Verifies:
+    - Cancellation exits without deadlock
+    - save_progress retains the current route index (no increment)
+    - _clear_jump_deadline is called once
+    - restock_tritium or coordinated restock is not invoked
+    """
+
+    def test_cancellation_during_countdown_saves_without_increment(
+        self, tmp_path: Path,
+    ) -> None:
+        """Cancel during scheduled-jump countdown: line_no stays at 0."""
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.side_effect = [False, True]
+
+        saved_indices: list[int] = []
+
+        def track_save(state: object, **_kw: object) -> None:
+            saved_indices.append(getattr(state, "line_no"))
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress", side_effect=track_save), \
+             patch.object(main, "jump_to_system", return_value=(10, datetime.datetime.now(datetime.timezone.utc))), \
+             patch.object(main, "restock_tritium") as mock_restock, \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            result = main._run_traversal_slot(context)
+
+        assert result is False
+        assert saved_indices == [0], (
+            f"save_progress should retain line_no=0, got {saved_indices}"
+        )
+        mock_restock.assert_not_called()
+
+    def test_cancellation_during_completion_wait_reverts_index(
+        self, tmp_path: Path,
+    ) -> None:
+        """Cancel during has_jumped() wait: line_no is reverted to 0."""
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = False
+        # False during countdown (4 iterations), then True in has_jumped loop
+        journal.jump_cancelled.side_effect = [False] * 4 + [False, True]
+
+        saved_indices: list[int] = []
+
+        def track_save(state: object, **_kw: object) -> None:
+            saved_indices.append(getattr(state, "line_no"))
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress", side_effect=track_save), \
+             patch.object(main, "jump_to_system", return_value=(10, datetime.datetime.now(datetime.timezone.utc))), \
+             patch.object(main, "restock_tritium") as mock_restock, \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            result = main._run_traversal_slot(context)
+
+        assert result is False
+        assert saved_indices == [0], (
+            f"save_progress should revert line_no to 0, got {saved_indices}"
+        )
+        mock_restock.assert_not_called()
+
+    def test_deadline_cleared_once_on_cancellation_during_completion_wait(
+        self, tmp_path: Path,
+    ) -> None:
+        """After registering a deadline, cancellation clears it exactly once."""
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = False
+        # Let countdown pass (4 iterations), then cancel in has_jumped loop
+        journal.jump_cancelled.side_effect = [False] * 4 + [False, True]
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(main, "jump_to_system", return_value=(10, datetime.datetime.now(datetime.timezone.utc))), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            result = main._run_traversal_slot(context)
+
+        assert result is False
+        # Deadline should have been registered then cleared exactly once
+        assert len(queue.register_calls) >= 1, "Deadline should have been registered"
+        assert len(queue.clear_calls) == 1, (
+            f"Expected exactly 1 clear_jump_deadline call, got {len(queue.clear_calls)}"
+        )
+
+    def test_no_deadlock_on_cancellation(self, tmp_path: Path) -> None:
+        """Cancellation exits cleanly without hanging.
+
+        Uses a facade mock where jump_cancelled returns True immediately
+        in the first countdown iteration.
+        """
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = False
+        journal.jump_cancelled.side_effect = [True]
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(main, "jump_to_system", return_value=(10, datetime.datetime.now(datetime.timezone.utc))), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            result = main._run_traversal_slot(context)
+
+        assert result is False
+
+
+# Module-level wrappers for Task 7 tests
+
+def test_cancellation_during_countdown_saves_without_increment(
+    tmp_path: Path,
+) -> None:
+    TestJumpCancellationHandling().test_cancellation_during_countdown_saves_without_increment(tmp_path)
+
+
+def test_cancellation_during_completion_wait_reverts_index(
+    tmp_path: Path,
+) -> None:
+    TestJumpCancellationHandling().test_cancellation_during_completion_wait_reverts_index(tmp_path)
+
+
+def test_deadline_cleared_once_on_cancellation_during_completion_wait(
+    tmp_path: Path,
+) -> None:
+    TestJumpCancellationHandling().test_deadline_cleared_once_on_cancellation_during_completion_wait(tmp_path)
+
+
+def test_no_deadlock_on_cancellation(tmp_path: Path) -> None:
+    TestJumpCancellationHandling().test_no_deadlock_on_cancellation(tmp_path)

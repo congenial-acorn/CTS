@@ -659,8 +659,7 @@ class TestDependencyInjectionChain:
         with patch.object(main, "DiscordHandler", return_value=MagicMock()), \
              patch.object(main, "Reshandler", FakeResHandler), \
              patch.object(main, "load_route_list", return_value=["Sol"]), \
-             patch.object(main, "latest_journal_path", return_value=tmp_path / "Journal.log"), \
-             patch.object(main, "start_journal_thread"), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
              patch.object(main, "jump_to_system", side_effect=_capture_jump), \
              patch.object(main, "SAVE_PATH", tmp_path / "missing-save.txt"), \
              patch.object(main.tzlocal, "get_localzone", return_value=datetime.timezone.utc):

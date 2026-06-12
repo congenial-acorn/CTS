@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -23,22 +24,72 @@ from TraversalSystem.gui.workers import (
     WorkerExecutionRequest,
 )
 from TraversalSystem.gui_config import CarrierSlotConfig, GuiConfig, UniversalSettings
+from TraversalSystem.multi_journal_router import CTSJournalFacade, MultiJournalRouter
 from TraversalSystem.sequence_queue import SequenceQueue
+from TraversalSystem.traversal_journal import JournalScanLoop
 from TraversalSystem.window_manager import WindowBinding
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalDependencyError(RuntimeError):
     pass
 
 
-JournalDependencyFactory = Callable[[UniversalSettings], object]
+JournalRuntimeFactory = Callable[[UniversalSettings], "JournalRuntime"]
 WindowDependencyFactory = Callable[[BindingSnapshot], object]
 FocusDependencyFactory = Callable[[WindowBinding, UniversalSettings], object]
 SequenceQueueDependencyFactory = Callable[[], object]
 
 
-def default_journal_dependency_factory(universal: UniversalSettings) -> object:
-    return Path(universal.journal_directory).expanduser()
+class JournalRuntime:
+    """Owns a shared ``MultiJournalRouter`` and ``JournalScanLoop`` for one
+    journal directory.  Provides per-FID facades via ``facade_for(fid)``.
+    """
+
+    def __init__(
+        self,
+        journal_dir: Path,
+        *,
+        error_callback: Callable[[Exception], None] | None = None,
+    ) -> None:
+        self.router: MultiJournalRouter = MultiJournalRouter()
+        self._journal_dir: Path = journal_dir
+        self._scan_loop: JournalScanLoop = JournalScanLoop(
+            self.router,
+            journal_dir,
+            error_callback=error_callback,
+        )
+        self._started: bool = False
+
+    def start(self) -> None:
+        """Start the background scan loop (idempotent)."""
+        if not self._started:
+            self._scan_loop.start()
+            self._started = True
+
+    def facade_for(self, fid: str) -> CTSJournalFacade:
+        """Return a per-FID read-only facade over the shared router."""
+        return CTSJournalFacade(self.router, fid)
+
+    def stop(self) -> None:
+        """Signal the scan loop to stop."""
+        self._scan_loop.stop()
+
+    @property
+    def scan_loop(self) -> JournalScanLoop:
+        return self._scan_loop
+
+
+def default_journal_runtime_factory(
+    universal: UniversalSettings,
+    *,
+    error_callback: Callable[[Exception], None] | None = None,
+) -> JournalRuntime:
+    return JournalRuntime(
+        Path(universal.journal_directory).expanduser(),
+        error_callback=error_callback,
+    )
 
 
 def default_window_dependency_factory(snapshot: BindingSnapshot) -> object:
@@ -112,7 +163,7 @@ class WorkerController(QObject):
         self,
         *,
         traversal_runner: TraversalRunner = _run_default_traversal,
-        journal_dependency_factory: JournalDependencyFactory = default_journal_dependency_factory,
+        journal_runtime_factory: JournalRuntimeFactory | None = None,
         window_dependency_factory: WindowDependencyFactory = default_window_dependency_factory,
         focus_dependency_factory: FocusDependencyFactory = default_focus_dependency_factory,
         sequence_queue_dependency_factory: SequenceQueueDependencyFactory = default_sequence_queue_dependency_factory,
@@ -121,14 +172,16 @@ class WorkerController(QObject):
     ) -> None:
         super().__init__(parent)
         self._traversal_runner = traversal_runner
-        self._journal_dependency_factory = journal_dependency_factory
+        self._journal_runtime_factory: JournalRuntimeFactory = (
+            journal_runtime_factory or default_journal_runtime_factory
+        )
         self._window_dependency_factory = window_dependency_factory
         self._focus_dependency_factory = focus_dependency_factory
         self._sequence_queue_dependency_factory = sequence_queue_dependency_factory
         self._failure_classifier = failure_classifier
         self._config: GuiConfig | None = None
         self._records: dict[int, SlotRuntimeRecord] = {}
-        self._shared_journal_dependency: object | None = None
+        self._journal_runtime: JournalRuntime | None = None
         self._shared_sequence_queue_dependency: object | None = None
 
     def sync_slots(
@@ -138,7 +191,7 @@ class WorkerController(QObject):
     ) -> None:
         self._config = config
         self._shutdown_shared_sequence_queue(wait=True)
-        self._shared_journal_dependency = None
+        self._stop_journal_runtime()
         self._shared_sequence_queue_dependency = None
         next_records: dict[int, SlotRuntimeRecord] = {}
         for slot in config.carrier_slots:
@@ -279,26 +332,38 @@ class WorkerController(QObject):
         binding = record.binding.window_binding
         if binding is None:
             raise ValueError("Ready slot requires a resolved window binding.")
-        journal_dependency = self._get_shared_journal_dependency(config.universal)
+        runtime = self._get_shared_journal_runtime(config.universal)
+        journal_facade = runtime.facade_for(record.slot.fid)
         sequence_queue_dependency = self._get_shared_sequence_queue_dependency()
         window_dependency = self._window_dependency_factory(record.binding)
         focus_dependency = self._focus_dependency_factory(binding, config.universal)
         return WorkerExecutionRequest(
             slot_id=self._slot_id(record.slot.slot_index),
             options=self._build_options(config.universal, record.slot),
-            journal_dependency=journal_dependency,
+            journal_dependency=journal_facade,
             window_dependency=window_dependency,
             focus_dependency=focus_dependency,
             sequence_queue_dependency=sequence_queue_dependency,
             cancel_event=threading.Event(),
         )
 
-    def _get_shared_journal_dependency(self, universal: UniversalSettings) -> object:
-        if self._shared_journal_dependency is not None:
-            return self._shared_journal_dependency
-        dependency = self._journal_dependency_factory(universal)
-        self._shared_journal_dependency = dependency
-        return dependency
+    def _get_shared_journal_runtime(self, universal: UniversalSettings) -> JournalRuntime:
+        """Return (and lazily create) the shared JournalRuntime for the
+        configured journal directory.  The scan loop is started on first
+        access so that journal state is populated before traversal begins.
+        """
+        if self._journal_runtime is not None:
+            return self._journal_runtime
+        runtime = self._journal_runtime_factory(universal)
+        runtime.start()
+        self._journal_runtime = runtime
+        return runtime
+
+    def _stop_journal_runtime(self) -> None:
+        runtime = self._journal_runtime
+        if runtime is not None:
+            runtime.stop()
+            self._journal_runtime = None
 
     def _on_runtime_status(self, slot_index: int, status: str) -> None:
         record = self._records[slot_index]
@@ -343,12 +408,14 @@ class WorkerController(QObject):
         record.worker = None
         record.cancel_event = None
         if all(item.thread is None for item in self._records.values()):
+            self._stop_journal_runtime()
             self._shutdown_shared_sequence_queue(wait=True)
             self._shared_sequence_queue_dependency = None
         self.slot_finished.emit(slot_index, success)
 
     def shutdown(self, *, wait: bool = True) -> None:
         _ = self.stop_all_active()
+        self._stop_journal_runtime()
         self._shutdown_shared_sequence_queue(wait=wait)
 
     def _apply_failure(self, slot_index: int, failure: SlotFailure) -> None:

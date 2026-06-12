@@ -51,8 +51,23 @@ def _build_module_overrides(base_dir: Path) -> dict[str, Any]:
     discord_mod = types.ModuleType("discordhandler")
     setattr(discord_mod, "DiscordHandler", type("DiscordHandler", (), {}))
 
-    watcher_mod = types.ModuleType("journalwatcher")
-    setattr(watcher_mod, "JournalWatcher", type("JournalWatcher", (), {}))
+    router_mod = types.ModuleType("multi_journal_router")
+    setattr(router_mod, "CTSJournalFacade", type("CTSJournalFacade", (), {
+        "__init__": lambda self, r, f: None,
+        "state": lambda self: True,
+        "target_fid": "F-STUB",
+    }))
+    setattr(router_mod, "MultiJournalRouter", type("MultiJournalRouter", (), {
+        "scan_once": lambda self, d: None,
+        "commanders": {},
+    }))
+
+    journal_mod = types.ModuleType("traversal_journal")
+    setattr(journal_mod, "JournalScanLoop", type("JournalScanLoop", (), {
+        "__init__": lambda self, r, d: None,
+        "start": lambda self: None,
+        "stop": lambda self: None,
+    }))
 
     res_mod = types.ModuleType("reshandler")
     setattr(
@@ -76,7 +91,8 @@ def _build_module_overrides(base_dir: Path) -> dict[str, Any]:
     return {
         "config": config_mod,
         "discordhandler": discord_mod,
-        "journalwatcher": watcher_mod,
+        "multi_journal_router": router_mod,
+        "traversal_journal": journal_mod,
         "reshandler": res_mod,
         "platform_utils": platform_mod,
         "input_handler": types.ModuleType("input_handler"),

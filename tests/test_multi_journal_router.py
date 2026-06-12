@@ -630,3 +630,123 @@ class TestFileHeaderVariants:
         fs = router.files[str(j)]
         assert fs.part == 2
         assert fs.fid == "F-FH2"
+
+
+# ---------------------------------------------------------------------------
+# FID consistency protection (EDCM-style)
+# ---------------------------------------------------------------------------
+
+class TestFIDConsistency:
+    """A file that changes its non-empty FID is permanently invalidated."""
+
+    def test_identity_change_commander_to_loadgame_invalidates(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-A", Name="CmdrA"),
+            _evt("LoadGame", FID="F-B", Commander="CmdrB"),
+            _evt("CarrierJumpRequest", SystemName="Sol",
+                  DepartureTime="2026-04-25T12:15:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert "F-A" in router.commanders
+        fa = router.commanders["F-A"]
+        assert fa.commander_name == "CmdrA"
+        assert fa.last_carrier_request is None
+        assert fa.departure_time is None
+
+        assert "F-B" not in router.commanders
+
+        fs = router.files[str(j)]
+        assert fs.identity_error is not None
+        assert "F-B" in fs.identity_error
+        assert fs.active is False
+
+    def test_identity_change_commander_to_commander_invalidates(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-A", Name="CmdrA"),
+            _evt("Commander", FID="F-C", Name="CmdrC"),
+            _evt("CarrierJumpRequest", SystemName="Deciat",
+                  DepartureTime="2026-04-25T12:20:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert "F-A" in router.commanders
+        assert "F-C" not in router.commanders
+        assert router.commanders["F-A"].last_carrier_request is None
+
+        fs = router.files[str(j)]
+        assert fs.identity_error is not None
+        assert fs.active is False
+
+    def test_fid_consistency_matching_fid_no_invalidation(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-A", Name="CmdrA"),
+            _evt("LoadGame", FID="F-A", Commander="CmdrA"),
+            _evt("CarrierJumpRequest", SystemName="Sol",
+                  DepartureTime="2026-04-25T12:15:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-A"].last_carrier_request == "Sol"
+        fs = router.files[str(j)]
+        assert fs.identity_error is None
+        assert fs.active is True
+
+    def test_fid_consistency_loadgame_without_fid_preserves(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-A", Name="CmdrA"),
+            _evt("LoadGame", Commander="CmdrA"),
+            _evt("CarrierJumpRequest", SystemName="Sol",
+                  DepartureTime="2026-04-25T12:15:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-A"].last_carrier_request == "Sol"
+        fs = router.files[str(j)]
+        assert fs.identity_error is None
+
+    def test_fid_consistency_subsequent_scans_still_ignored(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-A", Name="CmdrA"),
+            _evt("LoadGame", FID="F-B", Commander="CmdrB"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        _write_lines(j, [
+            _evt("CarrierJumpRequest", SystemName="Deciat",
+                  DepartureTime="2026-04-25T12:20:00Z"),
+        ])
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-A"].last_carrier_request is None
+        assert "F-B" not in router.commanders

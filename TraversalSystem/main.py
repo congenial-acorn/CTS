@@ -24,7 +24,7 @@ import tzlocal
 try:
     from .config import BASE_DIR, TraversalOptions, load_settings
     from .discordhandler import DiscordHandler
-    from .journalwatcher import JournalWatcher
+    from .multi_journal_router import CTSJournalFacade, MultiJournalRouter
     from .reshandler import Reshandler
     from .platform_utils import (
         get_screen_resolution,
@@ -39,10 +39,11 @@ try:
         TraversalRuntimeContext,
         TraversalStopped,
     )
+    from .traversal_journal import JournalScanLoop
 except ImportError:
     from config import BASE_DIR, TraversalOptions, load_settings  # type: ignore[reportMissingImports]
     from discordhandler import DiscordHandler  # type: ignore[reportMissingImports]
-    from journalwatcher import JournalWatcher  # type: ignore[reportMissingImports]
+    from multi_journal_router import CTSJournalFacade, MultiJournalRouter  # type: ignore[reportMissingImports]
     from reshandler import Reshandler  # type: ignore[reportMissingImports]
     from platform_utils import (  # type: ignore[reportMissingImports]
         get_screen_resolution,
@@ -57,6 +58,7 @@ except ImportError:
         TraversalRuntimeContext,
         TraversalStopped,
     )
+    from traversal_journal import JournalScanLoop  # type: ignore[reportMissingImports]
 
 # Get the screen resolution in a cross-platform manner
 screen_width, screen_height = get_screen_resolution()
@@ -198,7 +200,7 @@ def _load_carrier_csv(route_file: Path) -> List[str]:
     return route
 
 
-def latest_journal_path(journal_dir: Path) -> Path:
+def _find_newest_journal(journal_dir: Path) -> Path:
     directory = journal_dir.expanduser()
     if not directory.is_dir():
         raise FileNotFoundError(f"Journal directory not found: {directory}")
@@ -292,7 +294,7 @@ def jump_to_system(
     system_name: str,
     options: TraversalOptions,
     res_handler: Reshandler,
-    journal_watcher: JournalWatcher,
+    journal: object,
     sequence_dir: Path,
     runtime_context: TraversalRuntimeContext | None = None,
     focus_handler: InputHandlerAdapter | None = None,
@@ -304,14 +306,17 @@ def jump_to_system(
     if not options.auto_plot_jumps:
         pyperclip.copy(system_name.lower())
         print(f"alert:Please plot the jump to {system_name}. It has been copied to your clipboard.")
-        while journal_watcher.last_carrier_request() != system_name:
+        facade = cast(CTSJournalFacade, journal)
+        while facade.last_carrier_request() != system_name:
             if runtime_context is not None:
                 runtime_context.wait(1)
             else:
                 time.sleep(1)
 
         current_time = datetime.datetime.now(datetime.timezone.utc)
-        departure_time_str = journal_watcher.departureTime
+        departure_time_str = facade.departure_time()
+        if not departure_time_str:
+            return 0, 0
         departure_time = datetime.datetime.strptime(
             departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
         ).replace(tzinfo=pytz.UTC)
@@ -357,7 +362,8 @@ def jump_to_system(
 
     time.sleep(6)
 
-    if journal_watcher.last_carrier_request() != system_name:
+    facade = cast(CTSJournalFacade, journal)
+    if facade.last_carrier_request() != system_name:
         print("Jump appears to have failed.")
         follow_button_sequence(
             sequence_dir,
@@ -367,7 +373,9 @@ def jump_to_system(
         return 0, 0
 
     current_time = datetime.datetime.now(datetime.timezone.utc)
-    departure_time_str = journal_watcher.departureTime
+    departure_time_str = facade.departure_time()
+    if not departure_time_str:
+        return 0, 0
     departure_time = datetime.datetime.strptime(
         departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
     ).replace(tzinfo=pytz.UTC)
@@ -493,41 +501,11 @@ def handle_critical_error(
     os._exit(2)
 
 
-def start_journal_thread(
-    state: TraversalState,
-    journal_watcher: JournalWatcher,
-    journal_path: Path,
-    options: TraversalOptions,
-    discord_messenger: DiscordHandler,
-    route_name: str,
-) -> None:
-    state.stop_journal.clear()
-    state.latest_journal = journal_path
-
-    def runner():
-        while not state.stop_journal.is_set():
-            ok = journal_watcher.process_journal(journal_path)
-            if not ok:
-                handle_critical_error(
-                    "An error has occurred with the Flight Computer.",
-                    state,
-                    options,
-                    discord_messenger,
-                    route_name,
-                )
-                return
-            time.sleep(1)
-        print("Journal thread halted")
-
-    state.journal_thread = threading.Thread(target=runner, daemon=True)
-    state.journal_thread.start()
-
-
 def open_game(
     state: TraversalState,
     options: TraversalOptions,
     res_handler: Reshandler,
-    journal_watcher: JournalWatcher,
+    journal_dep: object,
     discord_messenger: DiscordHandler,
     route_name: str,
     focus_handler: InputHandlerAdapter | None = None,
@@ -538,7 +516,7 @@ def open_game(
     open_steam_game("359320")
     time.sleep(60)
 
-    journal_path = latest_journal_path(options.journal_directory)
+    journal_path = _find_newest_journal(options.journal_directory)
 
     menu_loaded = False
     while not menu_loaded:
@@ -573,19 +551,9 @@ def open_game(
             time.sleep(10)
 
     print("Switching to new journal...")
-    journal_watcher.reset_all()
-    new_journal = latest_journal_path(options.journal_directory)
-
+    facade = cast(CTSJournalFacade, journal_dep)
+    facade.reset_jump()
     state.stop_journal.clear()
-    start_journal_thread(
-        state,
-        journal_watcher,
-        new_journal,
-        options,
-        discord_messenger,
-        route_name,
-    )
-
     state.game_ready = True
 
 
@@ -622,9 +590,9 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         runtime_context.dependencies.focus,
     )
     sequence_queue = runtime_context.dependencies.sequence_queue
-    journal_watcher = cast(
-        JournalWatcher,
-        journal_dependency if journal_dependency is not None else JournalWatcher(),
+    journal = cast(
+        CTSJournalFacade,
+        journal_dependency,
     )
     discord_messenger = DiscordHandler(single_message=options.single_discord_message)
     res_handler = Reshandler(screen_width, screen_height)
@@ -674,6 +642,16 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         )
         registered_jump_deadline = True
 
+    def _handle_jump_cancelled(system_name: str, *, revert_index: bool) -> bool:
+        nonlocal progress_saved
+        clear_registered_jump_deadline()
+        if revert_index:
+            state.line_no -= 1
+        print(f"\nJump to {system_name} was cancelled. Saving progress and stopping slot.")
+        save_progress(state)
+        progress_saved = True
+        return False
+
     runtime_context.wait(5)
 
     try:
@@ -701,18 +679,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             state.line_no = len(route_list)
 
         try:
-            journal_path = latest_journal_path(options.journal_directory)
+            journal_path = _find_newest_journal(options.journal_directory)
         except Exception as exc:
             print(exc)
             return False
-        start_journal_thread(
-            state,
-            journal_watcher,
-            journal_path,
-            options,
-            discord_messenger,
-            route_name,
-        )
 
         for countdown in range(5, 0, -1):
             print(f"Beginning in {countdown}...")
@@ -746,6 +716,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
             runtime_context.wait(3)
             runtime_context.raise_if_cancelled()
+            journal.reset_cancel()
 
             print(f"Next stop: {system}")
             print("Beginning navigation.")
@@ -757,7 +728,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     system,
                     options,
                     res_handler,
-                    journal_watcher,
+                    journal,
                     SEQUENCE_DIR,
                     runtime_context,
                     focus_handler=focus_dependency,
@@ -769,7 +740,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         system,
                         options,
                         res_handler,
-                        journal_watcher,
+                        journal,
                         SEQUENCE_DIR,
                         runtime_context,
                         focus_handler=focus_dependency,
@@ -797,7 +768,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             state,
                             options,
                             res_handler,
-                            journal_watcher,
+                            journal,
                             discord_messenger,
                             route_name,
                             focus_dependency,
@@ -811,7 +782,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             proc.kill()
                     print("Launcher killed")
 
-                journal_watcher.reset_jump()
+                journal.reset_jump()
 
                 total_time = time_to_jump - 6
 
@@ -882,6 +853,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 runtime_context.transition("waiting")
                 print(f"Jump in {total_time:>4}s", end="\r", flush=True)
                 runtime_context.raise_if_cancelled()
+                if journal.jump_cancelled():
+                    return _handle_jump_cancelled(system, revert_index=False)
                 time.sleep(1)
 
                 match total_time:
@@ -922,6 +895,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     runtime_context.transition("waiting")
                     print(total_time)
                     runtime_context.raise_if_cancelled()
+                    if journal.jump_cancelled():
+                        return _handle_jump_cancelled(system, revert_index=True)
                     time.sleep(1)
                     total_time -= 1
 
@@ -947,7 +922,9 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                 while not completed:
                                     runtime_context.transition("waiting")
                                     runtime_context.raise_if_cancelled()
-                                    completed = journal_watcher.get_jumped()
+                                    if journal.jump_cancelled():
+                                        return _handle_jump_cancelled(system, revert_index=True)
+                                    completed = journal.has_jumped()
                                     if not completed:
                                         print("Jump not complete...")
                                         time.sleep(10)
@@ -956,6 +933,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                 while not state.game_ready:
                                     runtime_context.transition("waiting")
                                     runtime_context.raise_if_cancelled()
+                                    if journal.jump_cancelled():
+                                        return _handle_jump_cancelled(system, revert_index=True)
                                     print("Game not ready...")
                                     time.sleep(10)
                                 total_time = 152
@@ -1042,8 +1021,38 @@ def main() -> None:
         print(exc)
         os._exit(1)
 
-    if not run_traversal(options):
+    # --- CLI preflight: require target_fid and validate via facade ---
+    if not options.target_fid.strip():
+        print(
+            "Configuration error: target_fid is required for journal traversal. "
+            "Set target-fid in your settings file."
+        )
         os._exit(1)
+
+    router = MultiJournalRouter()
+    try:
+        router.scan_once(options.journal_directory)
+    except Exception as exc:
+        print(f"Journal directory scan failed: {exc}")
+        os._exit(1)
+
+    facade = CTSJournalFacade(router, options.target_fid.strip())
+    if facade.state() is None:
+        print(
+            f"Configuration error: target_fid {options.target_fid.strip()!r} "
+            f"not found in journals under {options.journal_directory}"
+        )
+        os._exit(1)
+
+    scan_loop = JournalScanLoop(router, options.journal_directory)
+    scan_loop.start()
+    try:
+        if not run_traversal(options, journal=facade):
+            os._exit(1)
+    except Exception:
+        raise
+    finally:
+        scan_loop.stop()
 
     os._exit(0)
 
