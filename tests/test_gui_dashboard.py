@@ -25,7 +25,7 @@ def mock_qdialog_exec(monkeypatch):
     monkeypatch.setattr(QDialog, "exec", lambda self: 1)
 
 from PySide6.QtCore import Qt, Signal, QObject
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QComboBox
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QComboBox, QListWidget
 
 from TraversalSystem.gui_config import (
     CarrierSlotConfig,
@@ -672,6 +672,33 @@ def test_manual_bind_flow(qapp, config, binding_controller, worker_controller, w
     assert dashboard.slot_widgets[0].manual_bind_btn.isEnabled()
 
 
+
+
+
+class TestManualBindDialog:
+    def test_dialog_creates_items(
+        self, qapp, config, binding_controller, worker_controller, window_info
+    ):
+        from TraversalSystem.gui.dashboard import ManualBindDialog
+
+        dialog = ManualBindDialog(
+            slot_index=0,
+            fid="F123",
+            candidate_windows=[window_info],
+            parent=None,
+        )
+
+        assert dialog.window_list.count() == 1
+        item = dialog.window_list.item(0)
+        assert item is not None
+        assert str(window_info.pid) in item.text()
+        assert window_info.title in item.text()
+
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        assert idx == 0
+
+        dialog.close()
+
 def test_use_discovered_commander_flow(qapp, config, binding_controller, worker_controller):
     """Test use discovered commander button."""
     dashboard = DashboardWidget(config, binding_controller, worker_controller)
@@ -722,9 +749,9 @@ def test_start_all_emits_no_ready_carriers(qapp, config, binding_controller, wor
     # Track calls to _log_global manually since it's an instance method
     original_log_global = dashboard._log_global
     calls = []
-    def mock_log_global(msg):
-        calls.append(msg)
-        original_log_global(msg)
+    def mock_log_global(message):
+        calls.append(message)
+        original_log_global(message)
     dashboard._log_global = mock_log_global
     
     dashboard.start_all_button.click()

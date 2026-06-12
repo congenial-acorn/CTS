@@ -8,18 +8,22 @@ from __future__ import annotations
 from typing import cast
 from collections.abc import Callable
 
+from PySide6.QtGui import QImage, QPixmap, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-    QScrollArea, QFrame, QTextEdit, QDialog, QListWidget, QDialogButtonBox,
+    QScrollArea, QFrame, QTextEdit, QDialog, QListWidget, QListWidgetItem,
+    QDialogButtonBox,
     QMessageBox,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QSize, Slot
 
 from TraversalSystem.gui_config import GuiConfig, CarrierSlotConfig, DiscoveredCommander
 from TraversalSystem.gui.binding_controller import BindingController, BindingSnapshot, SlotClassification
 from TraversalSystem.gui.worker_controller import WorkerController
 from TraversalSystem.gui.worker_state import WorkerState
+from TraversalSystem.window_capture import capture_window, create_placeholder
 from TraversalSystem.window_manager import WindowInfo
+from TraversalSystem.gui.theme import ED_DARK_BG, ED_PANEL_BG, ED_ORANGE, ED_TEXT, ED_BORDER
 
 
 # ---------------------------------------------------------------------------
@@ -27,12 +31,15 @@ from TraversalSystem.window_manager import WindowInfo
 # ---------------------------------------------------------------------------
 
 class ManualBindDialog(QDialog):
-    """Dialog for manually selecting a window for slot binding."""
+    """Dialog for manually selecting a window for slot binding.
     
+    Shows a simple list of candidate windows.
+    """
+
     window_selected = Signal(object)
-    
+
     def __init__(
-        self, 
+        self,
         slot_index: int,
         fid: str,
         candidate_windows: list[WindowInfo],
@@ -43,33 +50,37 @@ class ManualBindDialog(QDialog):
         self.fid = fid
         self.candidate_windows = candidate_windows
         self.selected_window: WindowInfo | None = None
-        
+
         self.setWindowTitle(f"Manual Bind - Slot {slot_index}")
         self.setMinimumWidth(400)
-        
+
         layout = QVBoxLayout(self)
-        
+
         # Instructions
         info_label = QLabel(f"Select a window for FID: {fid}")
         info_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(info_label)
-        
-        # Window list
+
         self.window_list = QListWidget()
-        for window in candidate_windows:
-            self.window_list.addItem(
-                f"Handle: {window.handle} | PID: {window.pid} | {window.title}"
-            )
+        self.window_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+        for i, window in enumerate(candidate_windows):
+            item = QListWidgetItem()
+            item.setText(f"{window.title} (PID: {window.pid})")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.window_list.addItem(item)
+
         layout.addWidget(self.window_list)
-        
+
         # Buttons
         button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
         )
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
-    
+
     def _on_accept(self) -> None:
         row = self.window_list.currentRow()
         if row >= 0 and row < len(self.candidate_windows):
@@ -77,7 +88,11 @@ class ManualBindDialog(QDialog):
             self.window_selected.emit(self.selected_window)
             self.accept()
         else:
-            QMessageBox.warning(self, "No Selection", "Please select a window from the list.")
+            QMessageBox.warning(
+                self,
+                "No Selection",
+                "Please select a window from the list.",
+            )
 
 
 # ---------------------------------------------------------------------------
