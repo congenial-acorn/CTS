@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from TraversalSystem.gui.workers import (
     WorkerExecutionRequest,
 )
 from TraversalSystem.gui_config import CarrierSlotConfig, GuiConfig, UniversalSettings
+from TraversalSystem.sequence_queue import SequenceQueue
 from TraversalSystem.window_manager import WindowBinding
 
 
@@ -32,6 +34,7 @@ class GlobalDependencyError(RuntimeError):
 JournalDependencyFactory = Callable[[UniversalSettings], object]
 WindowDependencyFactory = Callable[[BindingSnapshot], object]
 FocusDependencyFactory = Callable[[WindowBinding, UniversalSettings], object]
+SequenceQueueDependencyFactory = Callable[[], object]
 
 
 def default_journal_dependency_factory(universal: UniversalSettings) -> object:
@@ -54,24 +57,32 @@ def default_focus_dependency_factory(
     )
 
 
+def default_sequence_queue_dependency_factory() -> object:
+    return SequenceQueue()
+
+
 def _run_default_traversal(
     options: TraversalOptions,
     *,
     journal: object = None,
     window: object = None,
     focus: object = None,
+    sequence_queue: object = None,
     cancel_event: threading.Event | None = None,
     status_callback: Callable[[str], None] | None = None,
 ) -> bool:
-    from TraversalSystem.main import run_traversal as loaded_run_traversal  # pyright: ignore[reportUnknownVariableType]
+    from TraversalSystem.runtime.controller import TraversalController
 
-    runner = cast(TraversalRunner, loaded_run_traversal)
+    main_module = importlib.import_module("TraversalSystem.main")
+    traversal_slot = cast(Callable[[object], bool], getattr(main_module, "_run_traversal_slot"))
     return bool(
-        runner(
+        TraversalController().run(
+            traversal_slot,
             options,
             journal=journal,
             window=window,
             focus=focus,
+            sequence_queue=sequence_queue,
             cancel_event=cancel_event,
             status_callback=status_callback,
         )
@@ -104,6 +115,7 @@ class WorkerController(QObject):
         journal_dependency_factory: JournalDependencyFactory = default_journal_dependency_factory,
         window_dependency_factory: WindowDependencyFactory = default_window_dependency_factory,
         focus_dependency_factory: FocusDependencyFactory = default_focus_dependency_factory,
+        sequence_queue_dependency_factory: SequenceQueueDependencyFactory = default_sequence_queue_dependency_factory,
         failure_classifier: FailureClassifier | None = None,
         parent: QObject | None = None,
     ) -> None:
@@ -112,10 +124,12 @@ class WorkerController(QObject):
         self._journal_dependency_factory = journal_dependency_factory
         self._window_dependency_factory = window_dependency_factory
         self._focus_dependency_factory = focus_dependency_factory
+        self._sequence_queue_dependency_factory = sequence_queue_dependency_factory
         self._failure_classifier = failure_classifier
         self._config: GuiConfig | None = None
         self._records: dict[int, SlotRuntimeRecord] = {}
         self._shared_journal_dependency: object | None = None
+        self._shared_sequence_queue_dependency: object | None = None
 
     def sync_slots(
         self,
@@ -123,7 +137,9 @@ class WorkerController(QObject):
         binding_snapshots: Mapping[int, BindingSnapshot],
     ) -> None:
         self._config = config
+        self._shutdown_shared_sequence_queue(wait=True)
         self._shared_journal_dependency = None
+        self._shared_sequence_queue_dependency = None
         next_records: dict[int, SlotRuntimeRecord] = {}
         for slot in config.carrier_slots:
             snapshot = binding_snapshots[slot.slot_index]
@@ -264,6 +280,7 @@ class WorkerController(QObject):
         if binding is None:
             raise ValueError("Ready slot requires a resolved window binding.")
         journal_dependency = self._get_shared_journal_dependency(config.universal)
+        sequence_queue_dependency = self._get_shared_sequence_queue_dependency()
         window_dependency = self._window_dependency_factory(record.binding)
         focus_dependency = self._focus_dependency_factory(binding, config.universal)
         return WorkerExecutionRequest(
@@ -272,6 +289,7 @@ class WorkerController(QObject):
             journal_dependency=journal_dependency,
             window_dependency=window_dependency,
             focus_dependency=focus_dependency,
+            sequence_queue_dependency=sequence_queue_dependency,
             cancel_event=threading.Event(),
         )
 
@@ -324,7 +342,14 @@ class WorkerController(QObject):
         record.thread = None
         record.worker = None
         record.cancel_event = None
+        if all(item.thread is None for item in self._records.values()):
+            self._shutdown_shared_sequence_queue(wait=True)
+            self._shared_sequence_queue_dependency = None
         self.slot_finished.emit(slot_index, success)
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        _ = self.stop_all_active()
+        self._shutdown_shared_sequence_queue(wait=wait)
 
     def _apply_failure(self, slot_index: int, failure: SlotFailure) -> None:
         record = self._records[slot_index]
@@ -343,6 +368,21 @@ class WorkerController(QObject):
             if slot_index == failed_slot_index:
                 continue
             _ = self.stop_slot(slot_index)
+
+    def _get_shared_sequence_queue_dependency(self) -> object:
+        if self._shared_sequence_queue_dependency is not None:
+            return self._shared_sequence_queue_dependency
+        dependency = self._sequence_queue_dependency_factory()
+        self._shared_sequence_queue_dependency = dependency
+        return dependency
+
+    def _shutdown_shared_sequence_queue(self, *, wait: bool) -> None:
+        dependency = self._shared_sequence_queue_dependency
+        if dependency is None:
+            return
+        shutdown = getattr(dependency, "shutdown", None)
+        if callable(shutdown):
+            _ = shutdown(wait=wait)
 
     @staticmethod
     def _slot_id(slot_index: int) -> str:

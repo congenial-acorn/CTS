@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, final
 
 try:
     from ..config import TraversalOptions
@@ -41,7 +41,7 @@ def _as_int(value: object, default: int) -> int:
 
 
 def coerce_traversal_options(
-    options: TraversalOptions | Mapping[str, object],
+    options: TraversalOptions | Mapping[str, object] | object,
 ) -> TraversalOptions:
     if isinstance(options, TraversalOptions):
         return options
@@ -51,37 +51,50 @@ def coerce_traversal_options(
             "Traversal options must be a TraversalOptions instance or mapping."
         )
 
+    mapping = cast(Mapping[str, object], options)
     required = ("webhook_url", "journal_directory", "route_file")
-    missing = [name for name in required if name not in options]
+    missing = [name for name in required if name not in mapping]
     if missing:
         raise InvalidTraversalOptions(
             f"Missing traversal option(s): {', '.join(missing)}"
         )
 
     return TraversalOptions(
-        webhook_url=str(options["webhook_url"]),
-        journal_directory=Path(str(options["journal_directory"])),
-        route_file=Path(str(options["route_file"])),
-        route_position=_as_int(options.get("route_position"), 0),
-        tritium_slot=_as_int(options.get("tritium_slot"), 0),
-        auto_plot_jumps=bool(options.get("auto_plot_jumps", True)),
-        disable_refuel=bool(options.get("disable_refuel", False)),
-        power_saving=bool(options.get("power_saving", False)),
-        refuel_mode=_as_int(options.get("refuel_mode"), 0),
-        single_discord_message=bool(options.get("single_discord_message", False)),
-        shutdown_on_complete=bool(options.get("shutdown_on_complete", True)),
+        webhook_url=str(cast(str | object, mapping["webhook_url"])),
+        journal_directory=Path(str(cast(str | Path | object, mapping["journal_directory"]))),
+        route_file=Path(str(cast(str | Path | object, mapping["route_file"]))),
+        route_position=_as_int(mapping.get("route_position"), 0),
+        tritium_slot=_as_int(mapping.get("tritium_slot"), 0),
+        auto_plot_jumps=bool(mapping.get("auto_plot_jumps", True)),
+        disable_refuel=bool(mapping.get("disable_refuel", False)),
+        power_saving=bool(mapping.get("power_saving", False)),
+        refuel_mode=_as_int(mapping.get("refuel_mode"), 0),
+        single_discord_message=bool(mapping.get("single_discord_message", False)),
+        shutdown_on_complete=bool(mapping.get("shutdown_on_complete", True)),
     )
 
 
+@final
 class TraversalRuntimeDependencies:
-    __slots__ = ("journal", "window", "focus")
+    __slots__ = ("journal", "window", "focus", "sequence_queue", "slot_id")
 
-    def __init__(self, *, journal: object = None, window: object = None, focus: object = None) -> None:
+    def __init__(
+        self,
+        *,
+        journal: object = None,
+        window: object = None,
+        focus: object = None,
+        sequence_queue: object = None,
+        slot_id: int | None = None,
+    ) -> None:
         self.journal = journal
         self.window = window
         self.focus = focus
+        self.sequence_queue = sequence_queue
+        self.slot_id = slot_id
 
 
+@final
 class TraversalRuntimeContext:
     __slots__ = (
         "options",
@@ -130,13 +143,17 @@ class TraversalRuntimeContext:
         while remaining > 0:
             self.raise_if_cancelled()
             step = min(interval, remaining)
-            self._sleep(step)
+            if self.cancel_event.wait(step):
+                self.raise_if_cancelled()
+            else:
+                self._sleep(0)
             remaining -= step
 
         self.raise_if_cancelled()
         self.transition("running")
 
 
+@final
 class TraversalController:
     def __init__(self, *, sleep: Callable[[float], None] = time.sleep) -> None:
         self._sleep = sleep
@@ -144,13 +161,15 @@ class TraversalController:
     def run(
         self,
         traversal_callable: TraversalCallable,
-        options: TraversalOptions | Mapping[str, object],
+        options: TraversalOptions | Mapping[str, object] | object,
         *,
         journal: object = None,
         window: object = None,
         focus: object = None,
+        sequence_queue: object = None,
         cancel_event: threading.Event | None = None,
         status_callback: StatusCallback | None = None,
+        slot_id: int | None = None,
     ) -> bool:
         runtime_context = TraversalRuntimeContext(
             options=coerce_traversal_options(options),
@@ -158,6 +177,8 @@ class TraversalController:
                 journal=journal,
                 window=window,
                 focus=focus,
+                sequence_queue=sequence_queue,
+                slot_id=slot_id,
             ),
             cancel_event=cancel_event or threading.Event(),
             status_callback=status_callback,

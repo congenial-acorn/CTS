@@ -22,6 +22,7 @@ class WorkerExecutionRequest:
     journal_dependency: object
     window_dependency: object
     focus_dependency: object
+    sequence_queue_dependency: object
     cancel_event: threading.Event
 
 
@@ -55,17 +56,31 @@ class CarrierAutomationWorker(QObject):
         self.log.emit(f"Worker started for {self._request.slot_id}.")
 
         try:
+            _slot_idx: int | None = None
+            try:
+                _slot_idx = int(self._request.slot_id.rsplit("-", 1)[-1])
+            except (ValueError, IndexError):
+                pass
             success = bool(
                 self._traversal_runner(
                     self._request.options,
                     journal=self._request.journal_dependency,
                     window=self._request.window_dependency,
                     focus=self._request.focus_dependency,
+                    sequence_queue=self._request.sequence_queue_dependency,
                     cancel_event=self._request.cancel_event,
                     status_callback=self.runtime_status.emit,
+                    slot_id=_slot_idx,
                 )
             )
         except BaseException as exc:
+            if self._request.cancel_event.is_set():
+                self.log.emit(
+                    f"Worker stopped for {self._request.slot_id}: "
+                    + (str(exc) or exc.__class__.__name__)
+                )
+                self.finished.emit(False)
+                return
             failure = SlotFailure(
                 self._request.slot_id,
                 self._failure_classifier(exc),
