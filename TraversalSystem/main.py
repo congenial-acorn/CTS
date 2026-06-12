@@ -11,7 +11,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Tuple, cast
+from typing import Iterable, List, Protocol, Tuple, cast
 import urllib.error
 import urllib.request
 
@@ -64,6 +64,35 @@ pyautogui.FAILSAFE = False
 
 SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
+DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
+
+
+def resolve_save_path(base_dir: Path, *, slot_id: int) -> Path:
+    """Return the deterministic save path for a given GUI slot."""
+    return base_dir / f"save-slot-{slot_id}.txt"
+
+
+class InputHandlerAdapter(Protocol):
+    def press(self, key: str) -> None: ...
+    def keyDown(self, key: str) -> None: ...
+    def keyUp(self, key: str) -> None: ...
+    def click(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        button: str = "left",
+    ) -> None: ...
+    def moveTo(self, x: int, y: int) -> None: ...
+
+
+class SubmissionHandleAdapter(Protocol):
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+def _resolve_input_handler(
+    focus_handler: InputHandlerAdapter | None = None,
+) -> InputHandlerAdapter:
+    return focus_handler if focus_handler is not None else input_handler
 
 
 def parse_version_tag(tag: str) -> int:
@@ -132,6 +161,7 @@ class TraversalState:
     stop_journal: threading.Event = field(default_factory=threading.Event)
     journal_thread: threading.Thread | None = None
     route_complete: bool = False
+    slot_id: int | None = None
 
 
 def slight_random_time(base: float) -> float:
@@ -184,7 +214,13 @@ def latest_journal_path(journal_dir: Path) -> Path:
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
+def follow_button_sequence(
+    sequence_dir: Path,
+    sequence_name: str,
+    *,
+    focus_handler: InputHandlerAdapter | None = None,
+) -> None:
+    handler = _resolve_input_handler(focus_handler)
     sequence_path = sequence_dir / sequence_name
     if sequence_path.suffix == "":
         sequence_path = sequence_path.with_suffix(".txt")
@@ -196,9 +232,9 @@ def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
     for line in sequence_path.read_text(encoding="utf-8").splitlines():
         if ":" in line:
             key, duration = line.split(":", 1)
-            input_handler.keyDown(key)
+            handler.keyDown(key)
             time.sleep(slight_random_time(float(duration)))
-            input_handler.keyUp(key)
+            handler.keyUp(key)
         else:
             wait_time = 0.1
             key = line
@@ -207,11 +243,17 @@ def follow_button_sequence(sequence_dir: Path, sequence_name: str) -> None:
                 key, wait_raw = line.split("-", 1)
                 wait_time = float(wait_raw)
 
-            input_handler.press(key)
+            handler.press(key)
             time.sleep(slight_random_time(wait_time))
 
 
-def restock_tritium(options: TraversalOptions, sequence_dir: Path) -> None:
+def restock_tritium(
+    options: TraversalOptions,
+    sequence_dir: Path,
+    *,
+    focus_handler: InputHandlerAdapter | None = None,
+) -> None:
+    handler = _resolve_input_handler(focus_handler)
     if not options.auto_plot_jumps or options.disable_refuel:
         return
 
@@ -219,20 +261,28 @@ def restock_tritium(options: TraversalOptions, sequence_dir: Path) -> None:
 
     for step in restock_order:
         if options.refuel_mode == 2 and (sequence_dir / "squadron" / f"{step}.txt").exists():
-            follow_button_sequence(sequence_dir, f"squadron/{step}.txt")
+            follow_button_sequence(
+                sequence_dir,
+                f"squadron/{step}.txt",
+                focus_handler=handler,
+            )
         else:
-            follow_button_sequence(sequence_dir, f"{step}.txt")
+            follow_button_sequence(
+                sequence_dir,
+                f"{step}.txt",
+                focus_handler=handler,
+            )
 
         if step == "open_cargo_transfer":
             if options.refuel_mode == 1:
-                input_handler.press("w")
+                handler.press("w")
                 time.sleep(slight_random_time(0.1))
 
             for _ in range(options.tritium_slot):
                 if options.refuel_mode in (1, 2):
-                    input_handler.press("s")
+                    handler.press("s")
                 else:
-                    input_handler.press("w")
+                    handler.press("w")
                 time.sleep(slight_random_time(0.1))
 
     print("Refuel process completed.")
@@ -245,7 +295,9 @@ def jump_to_system(
     journal_watcher: JournalWatcher,
     sequence_dir: Path,
     runtime_context: TraversalRuntimeContext | None = None,
+    focus_handler: InputHandlerAdapter | None = None,
 ) -> Tuple[int, datetime.datetime | int]:
+    handler = _resolve_input_handler(focus_handler)
     if runtime_context is not None:
         runtime_context.raise_if_cancelled()
 
@@ -269,37 +321,49 @@ def jump_to_system(
         return int(delta.total_seconds()), departure_time
 
     if options.refuel_mode == 2:
-        follow_button_sequence(sequence_dir, "squadron/jump_nav_1.txt")
+        follow_button_sequence(
+            sequence_dir,
+            "squadron/jump_nav_1.txt",
+            focus_handler=handler,
+        )
     else:
-        follow_button_sequence(sequence_dir, "jump_nav_1.txt")
+        follow_button_sequence(
+            sequence_dir,
+            "jump_nav_1.txt",
+            focus_handler=handler,
+        )
 
     if runtime_context is not None:
         runtime_context.raise_if_cancelled()
 
-    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
+    handler.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
     time.sleep(slight_random_time(0.1))
-    input_handler.press("space")
+    handler.press("space")
     pyperclip.copy(system_name.lower())
     time.sleep(slight_random_time(1.0))
-    input_handler.keyDown("ctrl")
+    handler.keyDown("ctrl")
     time.sleep(slight_random_time(0.1))
-    input_handler.press("v")
+    handler.press("v")
     time.sleep(slight_random_time(0.1))
-    input_handler.keyUp("ctrl")
+    handler.keyUp("ctrl")
     time.sleep(slight_random_time(3.0))
-    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
+    handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
     time.sleep(slight_random_time(0.1))
-    input_handler.press("space")
+    handler.press("space")
     time.sleep(slight_random_time(0.1))
-    input_handler.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
+    handler.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
     time.sleep(slight_random_time(0.1))
-    input_handler.press("space")
+    handler.press("space")
 
     time.sleep(6)
 
     if journal_watcher.last_carrier_request() != system_name:
         print("Jump appears to have failed.")
-        follow_button_sequence(sequence_dir, "jump_fail.txt")
+        follow_button_sequence(
+            sequence_dir,
+            "jump_fail.txt",
+            focus_handler=handler,
+        )
         return 0, 0
 
     current_time = datetime.datetime.now(datetime.timezone.utc)
@@ -310,16 +374,102 @@ def jump_to_system(
 
     delta = departure_time - current_time
 
-    input_handler.press("backspace")
+    handler.press("backspace")
     time.sleep(slight_random_time(0.1))
-    input_handler.press("backspace")
+    handler.press("backspace")
 
     return int(delta.total_seconds()), departure_time
 
 
-def save_progress(state: TraversalState) -> None:
-    SAVE_PATH.write_text(str(state.line_no), encoding="utf-8")
+def save_progress(
+    state: TraversalState,
+    *,
+    slot_id: int | None = None,
+) -> None:
+    effective = slot_id if slot_id is not None else state.slot_id
+    if effective is not None:
+        resolve_save_path(BASE_DIR, slot_id=effective).write_text(
+            str(state.line_no), encoding="utf-8"
+        )
+    else:
+        # Legacy CLI path: writes to global SAVE_PATH
+        SAVE_PATH.write_text(str(state.line_no), encoding="utf-8")
     print("Progress saved...")
+
+
+def consume_save(base_dir: Path, *, slot_id: int | None = None) -> int | None:
+    """Read and delete a save file, returning the stored line_no or None."""
+    if slot_id is not None:
+        path = resolve_save_path(base_dir, slot_id=slot_id)
+        if path.exists():
+            value = int(path.read_text(encoding="utf-8"))
+            path.unlink(missing_ok=True)
+            return value
+        return None
+    if SAVE_PATH.exists():
+        value = int(SAVE_PATH.read_text(encoding="utf-8"))
+        SAVE_PATH.unlink(missing_ok=True)
+        return value
+    return None
+
+
+def _register_jump_deadline(
+    sequence_queue: object,
+    *,
+    slot_id: str,
+    deadline: float,
+) -> None:
+    register = getattr(sequence_queue, "register_jump_deadline", None)
+    if callable(register):
+        _ = register(slot_id=slot_id, deadline=deadline)
+
+
+def _clear_jump_deadline(sequence_queue: object, *, slot_id: str) -> None:
+    clear = getattr(sequence_queue, "clear_jump_deadline", None)
+    if callable(clear):
+        _ = clear(slot_id=slot_id)
+
+
+def _run_coordinated_restock(
+    *,
+    sequence_queue: object | None,
+    queue_slot_id: str | None,
+    cancel_event: threading.Event,
+    options: TraversalOptions,
+    sequence_dir: Path,
+    focus_handler: InputHandlerAdapter | None,
+) -> None:
+    if sequence_queue is None or queue_slot_id is None:
+        restock_tritium(
+            options,
+            sequence_dir,
+            focus_handler=focus_handler,
+        )
+        return
+
+    submit_restock = getattr(sequence_queue, "submit_restock", None)
+    if not callable(submit_restock):
+        restock_tritium(
+            options,
+            sequence_dir,
+            focus_handler=focus_handler,
+        )
+        return
+
+    handle = cast(
+        SubmissionHandleAdapter,
+        submit_restock(
+        slot_id=queue_slot_id,
+        run=lambda: restock_tritium(
+            options,
+            sequence_dir,
+            focus_handler=focus_handler,
+        ),
+        estimated_duration=DEFAULT_RESTOCK_ESTIMATE_SECONDS,
+        cancel_event=cancel_event,
+        ),
+    )
+    _ = handle.result()
 
 
 def handle_critical_error(
@@ -380,7 +530,9 @@ def open_game(
     journal_watcher: JournalWatcher,
     discord_messenger: DiscordHandler,
     route_name: str,
+    focus_handler: InputHandlerAdapter | None = None,
 ) -> None:
+    handler = _resolve_input_handler(focus_handler)
     print("Re-opening game...")
 
     open_steam_game("359320")
@@ -401,9 +553,13 @@ def open_game(
     time.sleep(10)
 
     print("Starting game...")
-    input_handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
-    input_handler.click()
-    follow_button_sequence(SEQUENCE_DIR, "start_game.txt")
+    handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
+    handler.click()
+    follow_button_sequence(
+        SEQUENCE_DIR,
+        "start_game.txt",
+        focus_handler=handler,
+    )
 
     loaded = False
     while not loaded:
@@ -413,7 +569,7 @@ def open_game(
             loaded = True
         else:
             print("Game not loaded...")
-            input_handler.press("space")
+            handler.press("space")
             time.sleep(10)
 
     print("Switching to new journal...")
@@ -442,6 +598,7 @@ def run_traversal(
     cancel_event: threading.Event | None = None,
     status_callback=None,
     controller: TraversalController | None = None,
+    slot_id: int | None = None,
 ) -> bool:
     runtime_controller = controller or TraversalController()
     return runtime_controller.run(
@@ -452,12 +609,19 @@ def run_traversal(
         focus=focus,
         cancel_event=cancel_event,
         status_callback=status_callback,
+        slot_id=slot_id,
     )
 
 
 def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
     options = runtime_context.options
+    slot_id: int | None = cast(int | None, runtime_context.dependencies.slot_id)
     journal_dependency = runtime_context.dependencies.journal
+    focus_dependency = cast(
+        InputHandlerAdapter | None,
+        runtime_context.dependencies.focus,
+    )
+    sequence_queue = runtime_context.dependencies.sequence_queue
     journal_watcher = cast(
         JournalWatcher,
         journal_dependency if journal_dependency is not None else JournalWatcher(),
@@ -472,9 +636,12 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
     state = TraversalState(
         line_no=options.route_position,
         saved_resume=options.route_position > 0,
+        slot_id=slot_id,
     )
     route_length = 0
     progress_saved = False
+    registered_jump_deadline = False
+    queue_slot_id = f"slot-{slot_id}" if slot_id is not None else None
 
     def maybe_save_progress() -> None:
         nonlocal progress_saved
@@ -486,6 +653,26 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             return
         save_progress(state)
         progress_saved = True
+
+    def clear_registered_jump_deadline() -> None:
+        nonlocal registered_jump_deadline
+        if not registered_jump_deadline:
+            return
+        if queue_slot_id is not None and sequence_queue is not None:
+            _clear_jump_deadline(sequence_queue, slot_id=queue_slot_id)
+        registered_jump_deadline = False
+
+    def register_next_jump_deadline(seconds_until_due: float) -> None:
+        nonlocal registered_jump_deadline
+        clear_registered_jump_deadline()
+        if queue_slot_id is None or sequence_queue is None:
+            return
+        _register_jump_deadline(
+            sequence_queue,
+            slot_id=queue_slot_id,
+            deadline=time.monotonic() + max(0.0, seconds_until_due),
+        )
+        registered_jump_deadline = True
 
     runtime_context.wait(5)
 
@@ -500,11 +687,11 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         route_name = f"Carrier Updates: Route to {route_list[-1]}"
         print(f"Destination: {route_list[-1]}")
 
-        if SAVE_PATH.exists():
+        restored = consume_save(BASE_DIR, slot_id=slot_id)
+        if restored is not None:
             print("Save file found. Setting up...")
-            state.line_no = int(SAVE_PATH.read_text(encoding="utf-8"))
+            state.line_no = restored
             state.saved_resume = True
-            SAVE_PATH.unlink(missing_ok=True)
 
         if state.line_no > len(route_list):
             print(
@@ -551,6 +738,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
         done_first = False
         for idx, system in enumerate(route_list):
+            clear_registered_jump_deadline()
             total_time = 0
             jumps_left -= 1
             if idx < state.line_no:
@@ -572,6 +760,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     journal_watcher,
                     SEQUENCE_DIR,
                     runtime_context,
+                    focus_handler=focus_dependency,
                 )
 
                 while time_to_jump == 0 or departing_time == 0:
@@ -583,6 +772,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         journal_watcher,
                         SEQUENCE_DIR,
                         runtime_context,
+                        focus_handler=focus_dependency,
                     )
                 assert isinstance(departing_time, datetime.datetime)
 
@@ -595,7 +785,11 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 if options.power_saving:
                     print("Power saving mode is active. Closing game...")
                     state.stop_journal.set()
-                    follow_button_sequence(SEQUENCE_DIR, "close_game.txt")
+                    follow_button_sequence(
+                        SEQUENCE_DIR,
+                        "close_game.txt",
+                        focus_handler=focus_dependency,
+                    )
                     threading.Timer(
                         time_to_jump,
                         open_game,
@@ -606,6 +800,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             journal_watcher,
                             discord_messenger,
                             route_name,
+                            focus_dependency,
                         ),
                     ).start()
                     state.game_ready = False
@@ -673,6 +868,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         discord_messenger.update_fields(0, 0)
 
             except Exception as exc:
+                clear_registered_jump_deadline()
                 print(exc)
                 handle_critical_error(
                     "An error has occurred with the Flight Computer.",
@@ -733,6 +929,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             else:
                 print("Counting down until next jump...")
                 total_time = 362
+                if idx + 1 < len(route_list):
+                    register_next_jump_deadline(total_time)
                 while total_time > 0:
                     runtime_context.transition("waiting")
                     print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
@@ -764,22 +962,30 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             print("Jump complete!")
                             runtime_context.transition("running")
                             discord_messenger.update_fields(8, 7)
+                            print("Submitting tritium restock to shared queue...")
+                            clear_registered_jump_deadline()
+                            restock_started_at = time.monotonic()
+                            _run_coordinated_restock(
+                                sequence_queue=sequence_queue,
+                                queue_slot_id=queue_slot_id,
+                                cancel_event=runtime_context.cancel_event,
+                                options=options,
+                                sequence_dir=SEQUENCE_DIR,
+                                focus_handler=focus_dependency,
+                            )
+                            restock_elapsed = time.monotonic() - restock_started_at
+                            total_time = max(0, total_time - int(restock_elapsed))
+                            if idx + 1 < len(route_list) and total_time > 0:
+                                register_next_jump_deadline(total_time)
                         case 151:
                             discord_messenger.update_fields(8, 8)
                         case 100:
                             discord_messenger.update_fields(8, 9)
-                        case 150:
-                            print("Restocking tritium...")
-                            time.sleep(2)
-                            threading.Thread(
-                                target=restock_tritium,
-                                args=(options, SEQUENCE_DIR),
-                                daemon=True,
-                            ).start()
 
                     time.sleep(1)
                     total_time -= 1
                 print()
+                clear_registered_jump_deadline()
                 runtime_context.transition("running")
                 discord_messenger.update_fields(9, 9)
 
@@ -817,6 +1023,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         maybe_save_progress()
         raise
     finally:
+        clear_registered_jump_deadline()
         maybe_save_progress()
 
 
