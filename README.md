@@ -1,26 +1,51 @@
-# CTS (Carrier Traversal System)
-The Traversal System is an Elite Dangerous fleet carrier auto-plotter, autojumper, and flight computer.
+<div align="center">
 
-This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). The majority of the code in this repository derives from the original.
+# CTS — Carrier Traversal System
 
-## Traversal features
-* Automatic jump plotting.
-* Supports personal and squadron carriers, including Drake, Fortune, Victory, Nautilus, and Javelin class carriers.
-* Tritium restocking workflows for personal and squadron refuel modes.
-* Route time estimation and Discord webhook updates.
-* Multi-carrier graphical workflow with dynamic commander binding.
-* Adjusts for variable jump timers.
-* Imports routes from plain text or Spansh fleet carrier router.
-* Saves and resumes if interrupted while traveling.
+**Elite Dangerous Fleet Carrier Auto-Plotter · Autojumper · Flight Computer**
 
-## Limitations and Safety Guards
-* **X11-only Linux automation limitation:** Window detection and keyboard/mouse command dispatch on Linux depend on X11 APIs. This means Wayland environments are not natively supported and automated traversal will fail to send game input.
-* **Ambiguous fail-closed safety rules:** If multiple game clients are detected, or if active game window focus is lost, CTS defaults to a strict fail-closed safety state. The active worker thread immediately halts and transitions the slot to an error state, preventing inputs from leaking to other applications.
-* **Game Automation Disclaimer:** Automated flight sequences are thoroughly validated using mock inputs and test suites. Real-world Elite Dangerous automation has not been verified on live player accounts beyond these isolated environments. Use this tool entirely at your own risk.
-* Supports Windows natively and Linux (via Proton/Wine). macOS is untested.
-* Odyssey is required; Horizons is not supported.
-* Default game keybinds must be configured. Reset to default keyboard+mouse if you use custom binds, a controller, or HOTAS.
-* Supported screen resolutions are listed in `resolutions.md`.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](#)
+[![Windows](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-green?logo=windows&logoColor=white)](#)
+[![MIT License](https://img.shields.io/badge/license-MIT-yellow)](#)
+
+A refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
+
+<br>
+
+```
+ ┌──────────────────────────────────────────────────────────┐
+ │                                                          │
+ │    ┌─┐  ┌─┐ ┌───┐ ┌───┐ ┌───┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐        │
+ │    │ └──┘ │ │   │ │   │ │ ┌─┘ │ │ │ │ │ │  ╰─╯        │
+ │    │  ┌─┐ │ │   │ │   │ │ │   │ │ │ │ │ │  ┌─┐        │
+ │    │  │ │ │ │   │ │   │ │ └─┐ │ │ │ │ │ │  │ │        │
+ │    └──┘ └─┘ └───┘ └───┘ └───┘ └─┘ └─┘ └─┘ └─┘        │
+ │                                                          │
+ └──────────────────────────────────────────────────────────┘
+```
+
+### Graphical Dashboard &nbsp;·&nbsp; Multi-Carrier Coordination &nbsp;·&nbsp; Autonomous Traversal
+
+Manage multiple fleet carriers simultaneously through a native GUI dashboard.
+Auto-bind commanders, plot jump routes, restock tritium, and monitor progress —
+all from a single control panel with per-carrier isolation.
+
+</div>
+
+---
+
+## Features
+
+- **Automatic jump plotting** — hands-off route execution with variable timer adjustment.
+- **Multi-carrier support** — configure and run multiple carriers concurrently, each on its own thread.
+- **Graphical dashboard** — GUI-first workflow with slot management, auto-binding, and start/stop controls.
+- **Carrier class support** — personal and squadron carriers: Drake, Fortune, Victory, Nautilus, Javelin.
+- **Tritium restocking** — workflows for personal and squadron refuel modes.
+- **Route time estimation** and **Discord webhook** status updates.
+- **Spansh integration** — import routes from plain text or the Spansh fleet carrier router.
+- **Resume on interruption** — writes a save file and picks up where you left off.
+- **Cross-platform** — Windows native, Linux via Proton/Wine.
+- **Legacy CLI fallback** — backward-compatible command-line interface still available.
 
 ## Installation
 
@@ -47,7 +72,7 @@ This is a refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS). 
 
 ## GUI Configuration and Workflow
 
-CTS now uses a GUI-first workflow as the primary setup and operating path. A graphical GUI configuration tool manages multiple accounts and universal settings.
+CTS uses a GUI-first workflow as the primary setup and operating path. A graphical configuration tool manages multiple accounts and universal settings.
 
 ### The Configuration File (`gui_config.json`)
 The graphical application stores all configurations in `gui_config.json` at the root directory. This JSON file is the single authoritative source of truth. Its schema version is pinned to `1` to ensure compatibility.
@@ -81,37 +106,6 @@ The dashboard panel coordinates active automation threads:
 * **Start All:** Begins traversal loops for all enabled, `ready` slots concurrently. Each carrier executes on its own isolated background thread.
 * **Stop All:** Signals all active workers to halt. Affected slot workers transition gracefully from `stopping` to `stopped`.
 * **Slot Enablement:** Individual slot widgets feature a checkbox. Unchecking this excludes the carrier slot from the mass start command.
-
-## Legacy Import and Export
-
-You can migrate your existing files or share slot configurations using the legacy import/export features.
-* **Legacy Import:** Select a legacy flat `settings.ini` to read its parameters. The tool creates a new `gui_config.json` with universal settings and places the legacy values into carrier slot 0. This is a one-way migration action, not a continuous synchronization.
-* **Legacy Export:** Select a carrier slot index and export its parameters combined with universal settings to a legacy-compatible `settings.ini`. A comment line is prepended to the exported file to remind you that `gui_config.json` remains the authoritative source.
-
-## Legacy CLI Workflow (Rollback Path)
-
-If you need to rollback to the GUI-free command-line interface, you can still do so. The legacy entrypoint remains fully functional for backward compatibility.
-
-### Legacy Configuration (`settings.ini`)
-Create a flat `settings.ini` next to the executable. Fill in these properties:
-* `webhook_url=` Discord webhook URL.
-* `journal_directory=` Path to Elite Dangerous journals.
-* `target-fid=` The Frontier ID to automate.
-* `tritium_slot=` Tritium cargo slot offset.
-* `route_file=` Path to your route file.
-* `route_position=` Route starting offset.
-* `auto-plot-jumps=` Set to `true` to let the system plot jumps automatically.
-* `disable-refuel=` Set to `true` to skip refueling operations.
-* `refuel-mode=` 0 for personal (first 8), 1 for personal (after 8), 2 for squadron.
-* `single-discord-message=` Set to `true` to edit a single webhook message.
-* `shutdown-on-complete=` Set to `true` to turn off the computer when finished.
-
-### Starting the Legacy Route
-* Dock with your carrier.
-* Position your game cursor over the "Carrier Services" option.
-* Ensure your internal panel (right) is on the home tab.
-* Run `python TraversalSystem/main.py` or the legacy executable.
-* Tab back to the Elite Dangerous window to allow automation input.
 
 ## Refueling Setup
 
@@ -150,6 +144,20 @@ Starting index 0 begins before the first system on the list. A value of 1 skips 
 ## Resuming the Route
 
 If automated traversal is interrupted by an error or user cancellation, CTS writes a `save.txt` file recording your current index along the route. Reopening the system will read this file and resume your journey from the exact location. This saved index overrides any default starting value.
+
+## Limitations and Safety Guards
+
+* **X11-only Linux automation limitation:** Window detection and keyboard/mouse command dispatch on Linux depend on X11 APIs. This means Wayland environments are not natively supported and automated traversal will fail to send game input.
+* **Ambiguous fail-closed safety rules:** If multiple game clients are detected, or if active game window focus is lost, CTS defaults to a strict fail-closed safety state. The active worker thread immediately halts and transitions the slot to an error state, preventing inputs from leaking to other applications.
+* **Game Automation Disclaimer:** Automated flight sequences are thoroughly validated using mock inputs and test suites. Real-world Elite Dangerous automation has not been verified on live player accounts beyond these isolated environments. Use this tool entirely at your own risk.
+* Supports Windows natively and Linux (via Proton/Wine). macOS is untested.
+* Odyssey is required; Horizons is not supported.
+* Default game keybinds must be configured. Reset to default keyboard+mouse if you use custom binds, a controller, or HOTAS.
+* Supported screen resolutions are listed in `resolutions.md`.
+
+## Legacy Documentation
+
+The legacy CLI workflow (`settings.ini`-based configuration) and import/export migration tools are documented in [`LEGACY.md`](LEGACY.md).
 
 ## Disclaimer and Legal
 
