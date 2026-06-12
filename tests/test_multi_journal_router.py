@@ -186,8 +186,9 @@ class TestIdentityGating:
         x = router.commanders["F-X"]
         assert x.commander_name == "X"
         assert x.last_carrier_request == "Sol"
-        # Fuel was set before identity, so it should NOT be tracked.
-        assert x.last_fuel is None
+        # Pre-identity CarrierStats should be replayed after Commander
+        # establishes identity.
+        assert x.last_fuel == 800.0
 
     def test_loadgame_establishes_identity(self, tmp_path: Path) -> None:
         j = tmp_path / "Journal.2026-04-25T120000.01.log"
@@ -750,3 +751,304 @@ class TestFIDConsistency:
 
         assert router.commanders["F-A"].last_carrier_request is None
         assert "F-B" not in router.commanders
+
+
+# ---------------------------------------------------------------------------
+# Predecessor-first rollover (no identity in successor)
+# ---------------------------------------------------------------------------
+
+class TestPredecessorFirstRollover:
+    """Predecessor Part 1 has identity + Continued; successor Part 2 has carrier
+    events only — no LoadGame or Commander in Part 2."""
+
+    def test_part2_carrier_events_inherit_fid(self, tmp_path: Path) -> None:
+        part1 = tmp_path / "Journal.2026-04-25T120000.01.log"
+        part2 = tmp_path / "Journal.2026-04-25T120000.02.log"
+
+        _write_lines(part1, [
+            _evt("Fileheader", gameversion="4.0", Part=1),
+            _evt("Commander", FID="F-R", Name="RollCmdr"),
+            _evt("Continued", Part=2),
+        ])
+        _write_lines(part2, [
+            _evt("Fileheader", gameversion="4.0", Part=2),
+            _evt("CarrierJumpRequest", SystemName="Sol",
+                  DepartureTime="2026-04-25T12:15:00Z"),
+            _evt("CarrierJump"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        r = router.commanders["F-R"]
+        assert r.last_carrier_request == "Sol"
+        assert r.has_jumped is True
+        assert str(part2) in r.active_files
+
+
+# ---------------------------------------------------------------------------
+# Successor-first / late-binding rollover
+# ---------------------------------------------------------------------------
+
+class TestSuccessorFirstLateBinding:
+    """Successor Part 2 scanned first with carrier events but no identity;
+    Part 1 identity arrives on a later scan."""
+
+    def test_buffered_part2_replayed_after_part1_identity(
+        self, tmp_path: Path,
+    ) -> None:
+        part1 = tmp_path / "Journal.2026-04-25T120000.01.log"
+        part2 = tmp_path / "Journal.2026-04-25T120000.02.log"
+
+        _write_lines(part2, [
+            _evt("Fileheader", gameversion="4.0", Part=2),
+            _evt("CarrierJumpRequest", SystemName="Deciat",
+                  DepartureTime="2026-04-25T12:20:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+        assert "F-LATE" not in router.commanders
+
+        _write_lines(part1, [
+            _evt("Fileheader", gameversion="4.0", Part=1),
+            _evt("Commander", FID="F-LATE", Name="LateCmdr"),
+            _evt("Continued", Part=2),
+        ])
+
+        router.scan_once(tmp_path)
+
+        late = router.commanders["F-LATE"]
+        assert late.last_carrier_request == "Deciat"
+        assert str(part2) in late.active_files
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous rollover (fail-closed)
+# ---------------------------------------------------------------------------
+
+class TestAmbiguousRollover:
+    """Two predecessors with different FIDs both expect Part=2; successor
+    must not inherit from either and must buffer events."""
+
+    def test_no_inherited_identity_no_mutation(self, tmp_path: Path) -> None:
+        pred1 = tmp_path / "Journal.2026-04-25T120000.01.log"
+        pred2 = tmp_path / "Journal.2026-04-25T120001.01.log"
+        succ = tmp_path / "Journal.2026-04-25T120002.01.log"
+
+        _write_lines(pred1, [
+            _evt("Fileheader", gameversion="4.0", Part=1),
+            _evt("Commander", FID="F-AMB1", Name="Amb1"),
+            _evt("Continued", Part=2),
+        ])
+        _write_lines(pred2, [
+            _evt("Fileheader", gameversion="4.0", Part=1),
+            _evt("Commander", FID="F-AMB2", Name="Amb2"),
+            _evt("Continued", Part=2),
+        ])
+        _write_lines(succ, [
+            _evt("Fileheader", gameversion="4.0", Part=2),
+            _evt("CarrierJumpRequest", SystemName="Shinrarta",
+                  DepartureTime="2026-04-25T12:25:00Z"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-AMB1"].last_carrier_request is None
+        assert router.commanders["F-AMB2"].last_carrier_request is None
+
+        succ_state = router.files[str(succ)]
+        assert succ_state.fid is None
+        assert succ_state.identity_error is None
+        assert len(succ_state.pending_events) > 0
+
+
+# ---------------------------------------------------------------------------
+# Buffer overflow (100-event cap)
+# ---------------------------------------------------------------------------
+
+class TestBufferOverflow:
+    """Pre-identity buffer caps at 100 carrier events; overflow drops oldest."""
+
+    def test_101_events_cap_at_100(self, tmp_path: Path) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+
+        events: list[dict[str, object]] = [
+            _evt("Fileheader", gameversion="4.0"),
+        ]
+        for i in range(101):
+            events.append(_evt(
+                "CarrierStats", FuelLevel=i,
+                timestamp=f"2026-04-25T12:{i // 60:02d}:{i % 60:02d}Z",
+            ))
+        events.append(_evt("Commander", FID="F-OVF", Name="OverflowCmdr"))
+
+        _write_lines(j, events)
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        fs = router.files[str(j)]
+        assert len(fs.pending_events) == 0
+        assert fs.pending_overflow is True
+
+        ovf = router.commanders["F-OVF"]
+        assert ovf.last_fuel == 100.0
+
+
+# ---------------------------------------------------------------------------
+# Truncation full reset
+# ---------------------------------------------------------------------------
+
+class TestTruncationFullReset:
+    """Truncating and rewriting with a different FID must reset all mutable
+    file state so no stale-mismatch error fires."""
+
+    def test_fid_change_after_truncation_no_mismatch(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-TR-A", Name="TruncA"),
+            _evt("CarrierStats", FuelLevel=800),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+        assert router.commanders["F-TR-A"].last_fuel == 800.0
+        assert str(j) in router.commanders["F-TR-A"].active_files
+
+        _ = j.write_text("", encoding="utf-8")
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-TR-B", Name="TruncB"),
+            _evt("CarrierStats", FuelLevel=600),
+        ])
+
+        router.scan_once(tmp_path)
+
+        assert "F-TR-B" in router.commanders
+        assert router.commanders["F-TR-B"].last_fuel == 600.0
+        assert str(j) not in router.commanders["F-TR-A"].active_files
+
+        fs = router.files[str(j)]
+        assert fs.identity_error is None
+        assert fs.fid == "F-TR-B"
+
+
+# ---------------------------------------------------------------------------
+# Stale timestamp protection
+# ---------------------------------------------------------------------------
+
+class TestStaleTimestampProtection:
+    """Older carrier events must not overwrite newer carrier-field state."""
+
+    def test_older_reread_does_not_overwrite_newer(
+        self, tmp_path: Path,
+    ) -> None:
+        j1 = tmp_path / "Journal.2026-04-25T120000.01.log"
+        j2 = tmp_path / "Journal.2026-04-25T120001.01.log"
+
+        _write_lines(j1, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-TS", Name="TsCmdr"),
+        ])
+        _write_lines(j2, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-TS", Name="TsCmdr"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        _write_lines(j1, [
+            _evt("CarrierJumpRequest", SystemName="Sol",
+                  DepartureTime="2026-04-25T12:15:00Z",
+                  timestamp="2026-04-25T12:15:00Z"),
+        ])
+        router.scan_once(tmp_path)
+        assert router.commanders["F-TS"].last_carrier_request == "Sol"
+
+        _write_lines(j2, [
+            _evt("CarrierJumpRequest", SystemName="Deciat",
+                  DepartureTime="2026-04-25T12:10:00Z",
+                  timestamp="2026-04-25T12:10:00Z"),
+        ])
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-TS"].last_carrier_request == "Sol"
+
+
+# ---------------------------------------------------------------------------
+# Equal timestamp tie
+# ---------------------------------------------------------------------------
+
+class TestEqualTimestampTie:
+    """Same-timestamp events use later file-order event deterministically."""
+
+    def test_same_timestamp_later_file_order_wins(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-TIE", Name="TieCmdr"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        _write_lines(j, [
+            _evt("CarrierStats", FuelLevel=100,
+                  timestamp="2026-04-25T12:30:00Z"),
+            _evt("CarrierStats", FuelLevel=200,
+                  timestamp="2026-04-25T12:30:00Z"),
+        ])
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-TIE"].last_fuel == 200.0
+
+
+# ---------------------------------------------------------------------------
+# active_files cleanup on deactivation
+# ---------------------------------------------------------------------------
+
+class TestActiveFilesCleanup:
+    """active_files must be cleaned when a file is deactivated or resets."""
+
+    def test_shutdown_removes_from_active_files(self, tmp_path: Path) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-CLN", Name="CleanCmdr"),
+            _evt("CarrierStats", FuelLevel=500),
+            _evt("Shutdown"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        cln = router.commanders["F-CLN"]
+        assert cln.last_fuel == 500.0
+        assert str(j) not in cln.active_files
+
+    def test_identity_mismatch_removes_from_active_files(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-ID1", Name="Id1"),
+            _evt("CarrierStats", FuelLevel=300),
+            _evt("LoadGame", FID="F-ID2", Commander="Id2"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert "F-ID1" in router.commanders
+        assert str(j) not in router.commanders["F-ID1"].active_files
