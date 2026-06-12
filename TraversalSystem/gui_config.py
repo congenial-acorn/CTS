@@ -65,6 +65,7 @@ class DiscoveredCommander:
     #: Discovery confidence: ``"confirmed"`` (journal-verified) or
     #: ``"tentative"`` (partial match / stale journal data).
     discovery_status: str = "confirmed"
+    is_squadron_carrier: bool = False
 
 
 @dataclass(slots=True)
@@ -110,6 +111,7 @@ class CarrierSlotConfig:
     shutdown_on_complete: bool = True
     #: Slot binding state: ``"unbound"`` or ``"ready"``.
     state: str = "unbound"
+    is_squadron_carrier: bool = False
 
     def is_bound(self) -> bool:
         """Return True when the slot has a resolved, known FID."""
@@ -305,6 +307,7 @@ def _parse_slot(index: int, data: Dict[str, Any]) -> CarrierSlotConfig:
         single_discord_message=bool(data.get("single_discord_message", False)),
         shutdown_on_complete=bool(data.get("shutdown_on_complete", True)),
         state=str(data.get("state", "unbound")),
+        is_squadron_carrier=bool(data.get("is_squadron_carrier", False)),
     )
 
 
@@ -319,6 +322,7 @@ def _parse_discovered_commander(
         carrier_name=str(data.get("carrier_name", "")),
         discovered_at=str(data.get("discovered_at", "")),
         discovery_status=str(data.get("discovery_status", "confirmed")),
+        is_squadron_carrier=bool(data.get("is_squadron_carrier", False)),
     )
 
 
@@ -508,6 +512,7 @@ def _slot_to_dict(slot: CarrierSlotConfig) -> Dict[str, Any]:
         "single_discord_message": slot.single_discord_message,
         "shutdown_on_complete": slot.shutdown_on_complete,
         "state": slot.state,
+        "is_squadron_carrier": slot.is_squadron_carrier,
     }
 
 
@@ -534,6 +539,7 @@ def _discovered_to_dict(cmdr: DiscoveredCommander) -> Dict[str, Any]:
         "carrier_name": cmdr.carrier_name,
         "discovered_at": cmdr.discovered_at,
         "discovery_status": cmdr.discovery_status,
+        "is_squadron_carrier": cmdr.is_squadron_carrier,
     }
 
 

@@ -759,3 +759,81 @@ class TestDiscoveredCommanderMetadata:
         )
         assert cfg.discovered_commanders[0].discovered_at == "2026-05-24T08:00:00Z"
         assert cfg.discovered_commanders[0].discovery_status == "tentative"
+
+
+# ---------------------------------------------------------------------------
+# Squadron carrier flag
+# ---------------------------------------------------------------------------
+
+class TestSquadronCarrierFlag:
+    """is_squadron_carrier field is parsed, serialised, and round-tripped."""
+
+    def test_parse_slot_squadron_true(self, tmp_path: Path):
+        data = {
+            "schema_version": 1,
+            "universal": {},
+            "carrier_slots": [{
+                "slot_index": 0,
+                "is_squadron_carrier": True,
+            }],
+        }
+        p = _write_json(tmp_path, data)
+        cfg = load_gui_config(p)
+        assert cfg.carrier_slots[0].is_squadron_carrier is True
+
+    def test_parse_slot_default_false_when_missing(self, tmp_path: Path):
+        data = {
+            "schema_version": 1,
+            "universal": {},
+            "carrier_slots": [{
+                "slot_index": 0,
+            }],
+        }
+        p = _write_json(tmp_path, data)
+        cfg = load_gui_config(p)
+        assert cfg.carrier_slots[0].is_squadron_carrier is False
+
+    def test_round_trip_preserves_squadron_true(self, tmp_path: Path):
+        data = {
+            "schema_version": 1,
+            "universal": {},
+            "carrier_slots": [{
+                "slot_index": 0,
+                "fid": "F123",
+                "commander_name": "Test",
+                "is_squadron_carrier": True,
+            }],
+        }
+        in_path = _write_json(tmp_path, data)
+        cfg = load_gui_config(in_path)
+        out_path = tmp_path / "out.json"
+        save_gui_config(cfg, out_path)
+
+        raw = json.loads(out_path.read_text(encoding="utf-8"))
+        assert raw["carrier_slots"][0]["is_squadron_carrier"] is True
+
+    def test_parse_discovered_commander_squadron_flag(self, tmp_path: Path):
+        data = {
+            "schema_version": 1,
+            "universal": {},
+            "carrier_slots": [],
+            "discovered_commanders": [{
+                "name": "TestCmdr",
+                "fid": "F-SQD",
+                "is_squadron_carrier": True,
+            }],
+        }
+        p = _write_json(tmp_path, data)
+        cfg = load_gui_config(p)
+        assert cfg.discovered_commanders[0].is_squadron_carrier is True
+
+    def test_discovered_to_dict_includes_flag(self):
+        from TraversalSystem.gui_config import _discovered_to_dict
+
+        cmdr = DiscoveredCommander(
+            name="TestCmdr",
+            fid="F-SQD",
+            is_squadron_carrier=True,
+        )
+        result = _discovered_to_dict(cmdr)
+        assert result["is_squadron_carrier"] is True
