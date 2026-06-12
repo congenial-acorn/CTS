@@ -71,6 +71,7 @@ class CommanderState:
     _ts_fuel: str | None = None
     _ts_jump: str | None = None
     _ts_cancel: str | None = None
+    is_squadron_carrier: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,9 @@ class MultiJournalRouter:
                 if ts is None or ts >= (cmdr._ts_fuel or ""):
                     cmdr._ts_fuel = ts
                     cmdr.last_fuel = float(fuel)
+            carrier_type = evt.get("CarrierType")
+            if carrier_type is not None:
+                cmdr.is_squadron_carrier = (carrier_type == "SquadronCarrier")
         elif event_name == "CarrierJump":
             if ts is None or ts >= (cmdr._ts_jump or ""):
                 cmdr._ts_jump = ts
@@ -408,6 +412,10 @@ class CTSJournalFacade:
     def jump_cancelled(self) -> bool:
         cmdr = self.state()
         return bool(cmdr and cmdr.jump_cancelled)
+
+    def is_squadron_carrier(self) -> bool:
+        cmdr = self.state()
+        return bool(cmdr and cmdr.is_squadron_carrier)
 
     def reset_cancel(self) -> None:
         cmdr = self.state()

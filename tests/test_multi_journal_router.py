@@ -1052,3 +1052,152 @@ class TestActiveFilesCleanup:
 
         assert "F-ID1" in router.commanders
         assert str(j) not in router.commanders["F-ID1"].active_files
+
+
+# ---------------------------------------------------------------------------
+# Squadron carrier detection
+# ---------------------------------------------------------------------------
+
+class TestSquadronCarrierDetection:
+    """CarrierType field from CarrierStats sets is_squadron_carrier flag."""
+
+    def test_carrier_stats_squadron_sets_flag(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-SQ", Name="SqCmdr"),
+            _evt("CarrierStats", FuelLevel=800,
+                  CarrierType="SquadronCarrier"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-SQ"].is_squadron_carrier is True
+        # Fuel parsing unaffected
+        assert router.commanders["F-SQ"].last_fuel == 800.0
+
+    def test_carrier_stats_personal_carrier_keeps_false(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-PC", Name="PcCmdr"),
+            _evt("CarrierStats", FuelLevel=600,
+                  CarrierType="PlayerCarrier"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-PC"].is_squadron_carrier is False
+
+    def test_carrier_stats_missing_type_defaults_false(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-DF", Name="DefaultCmdr"),
+            _evt("CarrierStats", FuelLevel=700),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        assert router.commanders["F-DF"].is_squadron_carrier is False
+
+    def test_facade_is_squadron_carrier_returns_true(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-SQ", Name="SqCmdr"),
+            _evt("CarrierStats", FuelLevel=800,
+                  CarrierType="SquadronCarrier"),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        facade = CTSJournalFacade(router, "F-SQ")
+        assert facade.is_squadron_carrier() is True
+
+    def test_facade_is_squadron_carrier_unknown_fid_returns_false(
+        self, tmp_path: Path,
+    ) -> None:
+        router = MultiJournalRouter()
+        facade = CTSJournalFacade(router, "F-NOPE")
+        assert facade.is_squadron_carrier() is False
+
+    def test_regression_existing_carrier_stats_no_carrier_type(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-REG", Name="RegCmdr"),
+            _evt("CarrierStats", FuelLevel=750),
+        ])
+
+        router = MultiJournalRouter()
+        router.scan_once(tmp_path)
+
+        cmdr = router.commanders["F-REG"]
+        assert cmdr.is_squadron_carrier is False
+        assert cmdr.last_fuel == 750.0
+
+
+# ---------------------------------------------------------------------------
+# Binding controller squadron propagation
+# ---------------------------------------------------------------------------
+
+class TestBindingSquadronPropagation:
+    """discover_commanders() propagates is_squadron_carrier to DiscoveredCommander."""
+
+    def test_discover_commanders_propagates_squadron_flag(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-SQ", Name="SqCmdr"),
+            _evt("CarrierStats", FuelLevel=800,
+                  CarrierType="SquadronCarrier"),
+        ])
+
+        from TraversalSystem.gui.binding_controller import BindingController
+
+        bc = BindingController(
+            router=MultiJournalRouter(),
+            discover_windows=lambda: [],
+        )
+        discovered = bc.discover_commanders(tmp_path)
+
+        sq = next(d for d in discovered if d.fid == "F-SQ")
+        assert sq.is_squadron_carrier is True
+
+    def test_discover_commanders_personal_carrier_flag_false(
+        self, tmp_path: Path,
+    ) -> None:
+        j = tmp_path / "Journal.2026-04-25T120000.01.log"
+        _write_lines(j, [
+            _evt("Fileheader", gameversion="4.0"),
+            _evt("Commander", FID="F-PC", Name="PcCmdr"),
+            _evt("CarrierStats", FuelLevel=600),
+        ])
+
+        from TraversalSystem.gui.binding_controller import BindingController
+
+        bc = BindingController(
+            router=MultiJournalRouter(),
+            discover_windows=lambda: [],
+        )
+        discovered = bc.discover_commanders(tmp_path)
+
+        pc = next(d for d in discovered if d.fid == "F-PC")
+        assert pc.is_squadron_carrier is False

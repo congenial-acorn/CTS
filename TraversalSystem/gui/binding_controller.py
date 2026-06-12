@@ -195,6 +195,7 @@ class BindingController:
                 fid=fid,
                 discovered_at=cmdr_state.last_event_ts or "",
                 discovery_status="confirmed" if cmdr_state.commander_name else "tentative",
+                is_squadron_carrier=cmdr_state.is_squadron_carrier,
             ))
         return discovered
 
