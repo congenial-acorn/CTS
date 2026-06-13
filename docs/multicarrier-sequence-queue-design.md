@@ -111,3 +111,12 @@ This avoids the worst case of a jump-plot being delayed by an in-progress restoc
 - Restock timing should move from 150s remaining to right after jump confirmation (~300s remaining) to use Window A optimally.
 - Jump-plot deadlines must be registered in shared state so the consumer can perform the look-ahead feasibility check.
 - The shared `save.txt` path needs per-slot isolation.
+
+## Final Verified Queue Semantics
+
+The implementation ensures the following execution behavior:
+* Worker threads remain concurrent. Each carrier thread runs on its own schedule.
+* Automation blocks for jump plotting and tritium restocking are serialized at coarse boundaries to prevent input overlapping.
+* Retries stay outside the sequence queue blocks, submitting separate single-attempt blocks.
+* Manual mode queues only clipboard and alert preparation. It does not queue the unbounded human or journal waiting phase, preventing queue blockages.
+

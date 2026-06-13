@@ -77,6 +77,12 @@ class _PendingBlock(Generic[T]):
 
 @final
 class SequenceQueue:
+    """A thread-safe sequence queue for serializing multi-carrier automation phases.
+
+    While worker threads remain concurrent, automation blocks (jump/restock) are serialized
+    at coarse boundaries. Retries stay outside queue blocks. Manual mode queues only
+    preparation.
+    """
     def __init__(self, *, time_fn: Callable[[], float] = time.monotonic) -> None:
         self._time_fn: Callable[[], float] = time_fn
         self._condition: threading.Condition = threading.Condition()
@@ -258,29 +264,22 @@ class SequenceQueue:
             (block for block in self._pending if block.kind == "restock"),
             key=lambda block: block.sequence,
         )
+        earliest_jump_deadline = self._earliest_jump_deadline_locked()
+        next_restock = self._first_feasible_restock_locked(
+            restocks,
+            earliest_jump_deadline,
+        )
 
         if jumps:
             earliest_jump = jumps[0]
-            if restocks:
-                first_restock = restocks[0]
-                if self._restock_is_feasible(
-                    first_restock,
-                    self._earliest_jump_deadline_locked(),
-                ):
-                    return first_restock
+            if next_restock is not None:
+                return next_restock
             return earliest_jump
 
-        first_restock = restocks[0] if restocks else None
-        if first_restock is None:
-            return None
-        if self._restock_is_feasible(
-            first_restock,
-            self._earliest_jump_deadline_locked(),
-        ):
-            return first_restock
-        return None
+        return next_restock
 
     def _earliest_jump_deadline_locked(self) -> float | None:
+        self._prune_stale_registered_deadlines_locked()
         deadlines = [
             block.handle.deadline
             for block in self._pending
@@ -290,6 +289,26 @@ class SequenceQueue:
         if not deadlines:
             return None
         return min(deadlines)
+
+    def _first_feasible_restock_locked(
+        self,
+        restocks: list[_PendingBlock[object]],
+        jump_deadline: float | None,
+    ) -> _PendingBlock[object] | None:
+        for restock in restocks:
+            if self._restock_is_feasible(restock, jump_deadline):
+                return restock
+        return None
+
+    def _prune_stale_registered_deadlines_locked(self) -> None:
+        now = self._time_fn()
+        stale_slot_ids = [
+            slot_id
+            for slot_id, deadline in self._registered_jump_deadlines.items()
+            if deadline <= now
+        ]
+        for slot_id in stale_slot_ids:
+            _ = self._registered_jump_deadlines.pop(slot_id, None)
 
     def _restock_is_feasible(
         self,

@@ -874,3 +874,136 @@ def test_two_slots_share_router_but_isolate_fids(
 
     _wait_for_controller_idle(qapp, controller, [0, 1])
     controller.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# Regression: per-slot power_saving / single_discord_message / shutdown_on_complete
+# ---------------------------------------------------------------------------
+
+
+def _per_slot_config(tmp_path: Path) -> tuple[GuiConfig, dict[int, BindingSnapshot]]:
+    """Build a config where slot values intentionally differ from universal
+    values for the three per-slot traversal option fields."""
+    route_file = tmp_path / "route.txt"
+    _ = route_file.write_text("Sol\n", encoding="utf-8")
+    slots = [
+        CarrierSlotConfig(
+            slot_index=0,
+            fid="FID-0",
+            commander_name="Cmdr 0",
+            route_file=str(route_file),
+            state="ready",
+            # Slot 0: power_saving=True, single_discord_message=True, shutdown_on_complete=False
+            power_saving=True,
+            single_discord_message=True,
+            shutdown_on_complete=False,
+        ),
+        CarrierSlotConfig(
+            slot_index=1,
+            fid="FID-1",
+            commander_name="Cmdr 1",
+            route_file=str(route_file),
+            state="ready",
+            # Slot 1: power_saving=False, single_discord_message=False, shutdown_on_complete=True
+            power_saving=False,
+            single_discord_message=False,
+            shutdown_on_complete=True,
+        ),
+    ]
+    config = GuiConfig(
+        universal=UniversalSettings(
+            webhook_url="https://example.invalid/hook",
+            journal_directory=str(tmp_path / "journals"),
+            multi_commander_enabled=True,
+            focus_timeout_seconds=7,
+            # Universal values intentionally OPPOSITE to slot values:
+            power_saving=False,
+            single_discord_message=False,
+            shutdown_on_complete=True,
+        ),
+        carrier_slots=slots,
+    )
+    bindings = {slot.slot_index: _binding_snapshot(slot) for slot in slots}
+    return config, bindings
+
+
+def test_per_slot_options_use_slot_values_not_universal(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    """_build_options() must read power_saving, single_discord_message, and
+    shutdown_on_complete from the *slot* config, NOT from universal settings.
+
+    This test fails (RED) when those three fields are still wired to
+    ``universal.*`` instead of ``slot.*``.
+    """
+    _ = qapp
+    config, bindings = _per_slot_config(tmp_path)
+    captured_options: dict[int, TraversalOptions] = {}
+    finished: list[tuple[int, bool]] = []
+
+    def traversal_runner(
+        options: TraversalOptions,
+        *,
+        journal: object = None,
+        window: object = None,
+        focus: object = None,
+        sequence_queue: object = None,
+        cancel_event: threading.Event | None = None,
+        status_callback: StatusCallback | None = None,
+        slot_id: int | None = None,
+    ) -> bool:
+        _ = journal, window, focus, sequence_queue, slot_id
+        assert cancel_event is not None
+        assert status_callback is not None
+        slot_index = int(options.target_fid.rsplit("-", 1)[-1])
+        captured_options[slot_index] = options
+        status_callback("running")
+        status_callback("complete")
+        return True
+
+    controller = WorkerController(traversal_runner=traversal_runner)
+    controller.sync_slots(config, bindings)
+
+    def on_finished(slot_index: int, success: bool) -> None:
+        finished.append((slot_index, success))
+
+    _ = controller.slot_finished.connect(on_finished)
+
+    assert controller.start_all_ready()[0] == [0, 1]
+    _wait_until(qapp, lambda: sorted(finished) == [(0, True), (1, True)])
+
+    # Slot 0 expectations
+    opts0 = captured_options[0]
+    assert opts0.power_saving is True, (
+        f"Slot 0 power_saving should be True (slot value), got {opts0.power_saving}"
+    )
+    assert opts0.single_discord_message is True, (
+        f"Slot 0 single_discord_message should be True (slot value), got {opts0.single_discord_message}"
+    )
+    assert opts0.shutdown_on_complete is False, (
+        f"Slot 0 shutdown_on_complete should be False (slot value), got {opts0.shutdown_on_complete}"
+    )
+
+    # Slot 1 expectations
+    opts1 = captured_options[1]
+    assert opts1.power_saving is False, (
+        f"Slot 1 power_saving should be False (slot value), got {opts1.power_saving}"
+    )
+    assert opts1.single_discord_message is False, (
+        f"Slot 1 single_discord_message should be False (slot value), got {opts1.single_discord_message}"
+    )
+    assert opts1.shutdown_on_complete is True, (
+        f"Slot 1 shutdown_on_complete should be True (slot value), got {opts1.shutdown_on_complete}"
+    )
+
+    # Universal values must still be used for non-slot fields
+    for opts in [opts0, opts1]:
+        assert opts.webhook_url == "https://example.invalid/hook"
+        assert opts.multi_commander_enabled is True
+        assert opts.auto_detect_window is True
+        assert opts.focus_timeout_seconds == 7
+        assert opts.ambiguous_window_policy == "abort"
+
+    _wait_for_controller_idle(qapp, controller, [0, 1])
+    controller.shutdown(wait=True)

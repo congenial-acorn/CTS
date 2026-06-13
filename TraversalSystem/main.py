@@ -66,6 +66,7 @@ pyautogui.FAILSAFE = False
 
 SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
+DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS = 30.0
 DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
 
 
@@ -304,26 +305,12 @@ def jump_to_system(
         runtime_context.raise_if_cancelled()
 
     if not options.auto_plot_jumps:
-        pyperclip.copy(system_name.lower())
-        print(f"alert:Please plot the jump to {system_name}. It has been copied to your clipboard.")
-        facade = cast(CTSJournalFacade, journal)
-        while facade.last_carrier_request() != system_name:
-            if runtime_context is not None:
-                runtime_context.wait(1)
-            else:
-                time.sleep(1)
-
-        current_time = datetime.datetime.now(datetime.timezone.utc)
-        departure_time_str = facade.departure_time()
-        if not departure_time_str:
-            return 0, 0
-        departure_time = datetime.datetime.strptime(
-            departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=pytz.UTC)
-
-        delta = departure_time - current_time
-
-        return int(delta.total_seconds()), departure_time
+        _prepare_manual_jump_plot(system_name)
+        return _wait_for_manual_jump_confirmation(
+            system_name,
+            journal,
+            runtime_context,
+        )
 
     if options.refuel_mode == 2:
         follow_button_sequence(
@@ -389,6 +376,119 @@ def jump_to_system(
     return int(delta.total_seconds()), departure_time
 
 
+def _prepare_manual_jump_plot(system_name: str) -> None:
+    pyperclip.copy(system_name.lower())
+    print(f"alert:Please plot the jump to {system_name}. It has been copied to your clipboard.")
+
+
+def _wait_for_manual_jump_confirmation(
+    system_name: str,
+    journal: object,
+    runtime_context: TraversalRuntimeContext | None,
+) -> Tuple[int, datetime.datetime | int]:
+    facade = cast(CTSJournalFacade, journal)
+    while facade.last_carrier_request() != system_name:
+        if runtime_context is not None:
+            runtime_context.wait(1)
+        else:
+            time.sleep(1)
+
+    current_time = datetime.datetime.now(datetime.timezone.utc)
+    departure_time_str = facade.departure_time()
+    if not departure_time_str:
+        return 0, 0
+    departure_time = datetime.datetime.strptime(
+        departure_time_str, "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=pytz.UTC)
+
+    delta = departure_time - current_time
+
+    return int(delta.total_seconds()), departure_time
+
+
+def _run_coordinated_jump_plot(
+    *,
+    sequence_queue: object | None,
+    queue_slot_id: str | None,
+    system_name: str,
+    options: TraversalOptions,
+    res_handler: Reshandler,
+    journal: object,
+    sequence_dir: Path,
+    runtime_context: TraversalRuntimeContext | None,
+    focus_handler: InputHandlerAdapter | None,
+) -> Tuple[int, datetime.datetime | int]:
+    """Run a coordinated jump plot sequence through the queue.
+
+    This helper serializes the jump plotting attempt to prevent input conflicts.
+    Worker threads remain concurrent.
+    Automation blocks (jump/restock) are serialized.
+    Retries stay outside queue blocks.
+    In manual mode, only clipboard and alert preparation are queued. The human/journal
+    waiting phase runs outside the queue block.
+    """
+    if sequence_queue is None or queue_slot_id is None or runtime_context is None:
+        return jump_to_system(
+            system_name,
+            options,
+            res_handler,
+            journal,
+            sequence_dir,
+            runtime_context,
+            focus_handler=focus_handler,
+        )
+
+    submit_jump_plot = getattr(sequence_queue, "submit_jump_plot", None)
+    if not callable(submit_jump_plot):
+        return jump_to_system(
+            system_name,
+            options,
+            res_handler,
+            journal,
+            sequence_dir,
+            runtime_context,
+            focus_handler=focus_handler,
+        )
+
+    if not options.auto_plot_jumps:
+        handle = cast(
+            SubmissionHandleAdapter,
+            submit_jump_plot(
+                slot_id=queue_slot_id,
+                run=lambda: _prepare_manual_jump_plot(system_name),
+                deadline=time.monotonic(),
+                estimated_duration=DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS,
+                cancel_event=runtime_context.cancel_event,
+            ),
+        )
+        _ = handle.result()
+        return _wait_for_manual_jump_confirmation(
+            system_name,
+            journal,
+            runtime_context,
+        )
+
+    handle = cast(
+        SubmissionHandleAdapter,
+        submit_jump_plot(
+            slot_id=queue_slot_id,
+            run=lambda: jump_to_system(
+                system_name,
+                options,
+                res_handler,
+                journal,
+                sequence_dir,
+                runtime_context,
+                focus_handler=focus_handler,
+            ),
+            deadline=time.monotonic(),
+            estimated_duration=DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS,
+            cancel_event=runtime_context.cancel_event,
+        ),
+    )
+    return cast(Tuple[int, datetime.datetime | int], handle.result())
+
+
 def save_progress(
     state: TraversalState,
     *,
@@ -447,6 +547,13 @@ def _run_coordinated_restock(
     sequence_dir: Path,
     focus_handler: InputHandlerAdapter | None,
 ) -> None:
+    """Run a coordinated tritium restock sequence through the queue.
+
+    This helper serializes the restock action to prevent input conflicts.
+    Worker threads remain concurrent.
+    Automation blocks (jump/restock) are serialized.
+    Retries stay outside queue blocks.
+    """
     if sequence_queue is None or queue_slot_id is None:
         restock_tritium(
             options,
@@ -724,25 +831,19 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
 
             try:
-                time_to_jump, departing_time = jump_to_system(
-                    system,
-                    options,
-                    res_handler,
-                    journal,
-                    SEQUENCE_DIR,
-                    runtime_context,
-                    focus_handler=focus_dependency,
-                )
-
+                time_to_jump = 0
+                departing_time: datetime.datetime | int = 0
                 while time_to_jump == 0 or departing_time == 0:
                     runtime_context.raise_if_cancelled()
-                    time_to_jump, departing_time = jump_to_system(
-                        system,
-                        options,
-                        res_handler,
-                        journal,
-                        SEQUENCE_DIR,
-                        runtime_context,
+                    time_to_jump, departing_time = _run_coordinated_jump_plot(
+                        sequence_queue=sequence_queue,
+                        queue_slot_id=queue_slot_id,
+                        system_name=system,
+                        options=options,
+                        res_handler=res_handler,
+                        journal=journal,
+                        sequence_dir=SEQUENCE_DIR,
+                        runtime_context=runtime_context,
                         focus_handler=focus_dependency,
                     )
                 assert isinstance(departing_time, datetime.datetime)
@@ -784,7 +885,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
                 journal.reset_jump()
 
-                total_time = time_to_jump - 6
+                total_time = max(0, time_to_jump - 6)
 
                 if total_time > 900:
                     arrival_time = arrival_time + datetime.timedelta(
@@ -855,7 +956,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 runtime_context.raise_if_cancelled()
                 if journal.jump_cancelled():
                     return _handle_jump_cancelled(system, revert_index=False)
-                time.sleep(1)
+                runtime_context.wait(1)
 
                 match total_time:
                     case 600:
@@ -897,7 +998,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     runtime_context.raise_if_cancelled()
                     if journal.jump_cancelled():
                         return _handle_jump_cancelled(system, revert_index=True)
-                    time.sleep(1)
+                    runtime_context.wait(1)
                     total_time -= 1
 
                 discord_messenger.update_fields(9, 9)
@@ -927,7 +1028,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                     completed = journal.has_jumped()
                                     if not completed:
                                         print("Jump not complete...")
-                                        time.sleep(10)
+                                        runtime_context.wait(10)
                             else:
                                 print("\nPausing execution until game is open and ready...")
                                 while not state.game_ready:
@@ -936,7 +1037,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                     if journal.jump_cancelled():
                                         return _handle_jump_cancelled(system, revert_index=True)
                                     print("Game not ready...")
-                                    time.sleep(10)
+                                    runtime_context.wait(10)
                                 total_time = 152
                             print("Jump complete!")
                             runtime_context.transition("running")
@@ -961,7 +1062,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         case 100:
                             discord_messenger.update_fields(8, 9)
 
-                    time.sleep(1)
+                    runtime_context.wait(1)
                     total_time -= 1
                 print()
                 clear_registered_jump_deadline()

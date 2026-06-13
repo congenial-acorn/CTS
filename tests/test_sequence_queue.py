@@ -609,3 +609,157 @@ def test_deadline_cleanup_reopens_restock_feasibility() -> None:
         assert can_start_restock(estimated_duration=60.0) is True
     finally:
         _shutdown_queue(queue)
+
+
+def test_stale_registered_deadline_does_not_wedge_restock() -> None:
+    clock = _ManualClock(start=100.0)
+    queue, _cancelled_error = _make_queue(clock)
+    started = threading.Event()
+
+    can_start_restock = getattr(queue, "can_start_restock", None)
+    register_deadline = getattr(queue, "register_jump_deadline", None)
+    if not callable(can_start_restock) or not callable(register_deadline):
+        pytest.fail(
+            "SequenceQueue must expose can_start_restock() and "
+            + "register_jump_deadline() for stale deadline cleanup checks."
+        )
+
+    def restock() -> str:
+        started.set()
+        return "restock"
+
+    try:
+        _ = register_deadline(slot_id="slot-stale", deadline=clock.now())
+
+        assert can_start_restock(estimated_duration=60.0) is True
+
+        handle = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=60.0,
+            run=restock,
+        )
+
+        assert handle.done.wait(1.0)
+        assert started.is_set() is True
+        assert handle.result(timeout=0.1) == "restock"
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_later_feasible_restock_runs_when_fifo_head_cannot_fit() -> None:
+    clock = _ManualClock()
+    queue, _cancelled_error = _make_queue(clock)
+    execution_order: list[str] = []
+
+    register_deadline = getattr(queue, "register_jump_deadline", None)
+    clear_deadline = getattr(queue, "clear_jump_deadline", None)
+    if not callable(register_deadline) or not callable(clear_deadline):
+        pytest.fail(
+            "SequenceQueue must expose register_jump_deadline(slot_id, deadline) "
+            + "and clear_jump_deadline(slot_id) for FIFO restock checks."
+        )
+
+    def make_restock(label: str, duration: float) -> Callable[[], str]:
+        def run() -> str:
+            execution_order.append(label)
+            clock.advance(duration)
+            return label
+
+        return run
+
+    try:
+        _ = register_deadline(slot_id="slot-jump", deadline=clock.now() + 8.0)
+
+        blocked = _submit_restock(
+            queue,
+            slot_id="slot-blocked",
+            estimated_duration=10.0,
+            run=make_restock("restock-blocked", 10.0),
+        )
+        feasible = _submit_restock(
+            queue,
+            slot_id="slot-feasible",
+            estimated_duration=5.0,
+            run=make_restock("restock-feasible", 5.0),
+        )
+
+        assert feasible.done.wait(1.0)
+        _ = clear_deadline(slot_id="slot-jump")
+
+        assert blocked.done.wait(1.0)
+        assert feasible.result(timeout=0.1) == "restock-feasible"
+        assert blocked.result(timeout=0.1) == "restock-blocked"
+        assert execution_order == ["restock-feasible", "restock-blocked"]
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_cancelling_blocked_restock_signals_completion_and_releases_later_work() -> None:
+    clock = _ManualClock()
+    queue, cancelled_error = _make_queue(clock)
+    active_started = threading.Event()
+    release_active = threading.Event()
+    blocked_cancel = threading.Event()
+    execution_order: list[str] = []
+
+    register_deadline = getattr(queue, "register_jump_deadline", None)
+    if not callable(register_deadline):
+        pytest.fail(
+            "SequenceQueue must expose register_jump_deadline(slot_id, deadline) "
+            + "for blocked restock cancellation checks."
+        )
+
+    def active_jump() -> str:
+        execution_order.append("active")
+        active_started.set()
+        assert release_active.wait(1.0)
+        return "active"
+
+    def blocked_restock() -> str:
+        execution_order.append("restock-blocked")
+        return "restock-blocked"
+
+    def feasible_restock() -> str:
+        execution_order.append("restock-feasible")
+        return "restock-feasible"
+
+    try:
+        _ = _submit_jump_plot(
+            queue,
+            slot_id="slot-active",
+            deadline=clock.now() + 100.0,
+            estimated_duration=30.0,
+            run=active_jump,
+        )
+        assert active_started.wait(1.0)
+
+        _ = register_deadline(slot_id="slot-jump", deadline=clock.now() + 8.0)
+
+        blocked = _submit_restock(
+            queue,
+            slot_id="slot-blocked",
+            estimated_duration=10.0,
+            run=blocked_restock,
+            cancel_event=blocked_cancel,
+        )
+        feasible = _submit_restock(
+            queue,
+            slot_id="slot-feasible",
+            estimated_duration=5.0,
+            run=feasible_restock,
+        )
+
+        assert feasible.done.wait(0.05) is False
+
+        blocked_cancel.set()
+        release_active.set()
+
+        assert blocked.done.wait(1.0)
+        assert feasible.done.wait(1.0)
+        assert feasible.result(timeout=0.1) == "restock-feasible"
+        with pytest.raises(cancelled_error):
+            _ = blocked.result(timeout=0.1)
+        assert execution_order == ["active", "restock-feasible"]
+    finally:
+        _shutdown_queue(queue)

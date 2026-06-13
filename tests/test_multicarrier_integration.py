@@ -768,7 +768,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
-            sleep=lambda _seconds: None,
+            sleep=sleep_side_effect,
             cancel_event=cancel_event,
         )
 
@@ -807,7 +807,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
     def stop_sleep(_seconds: float) -> None:
         nonlocal sleep_calls
         sleep_calls += 1
-        if sleep_calls == 5:
+        if sleep_calls >= 20:
             stop_event.set()
 
     with pytest.raises(TraversalStopped):
@@ -2335,3 +2335,153 @@ def test_deadline_cleared_once_on_cancellation_during_completion_wait(
 
 def test_no_deadlock_on_cancellation(tmp_path: Path) -> None:
     TestJumpCancellationHandling().test_no_deadlock_on_cancellation(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (plan task 4): Harden traversal countdown waits
+#
+# Covers:
+# - Short jump countdowns clamp total_time at zero
+# - Countdown/polling waits use runtime_context.wait() for cooperative
+#   cancellation instead of raw time.sleep()
+# ---------------------------------------------------------------------------
+
+
+class TestCountdownHardening:
+    """Task 4: short-jump countdown clamping and cancel-aware waits."""
+
+    def test_short_jump_countdown_clamps_to_zero(self, tmp_path: Path) -> None:
+        """With time_to_jump < 6, total_time = max(0, time_to_jump - 6) = 0.
+
+        The countdown loop (while total_time > 0) is skipped entirely and
+        the traversal proceeds to the next-jump countdown without error.
+        This is a characterization test: it passes both before and after the
+        max(0, ...) clamp, confirming no regression at the boundary.
+        """
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.return_value = False
+
+        jump_time = datetime.datetime.now(datetime.timezone.utc)
+        jump_calls = 0
+
+        def fake_jump(*_a: object, **_kw: object) -> tuple[int, datetime.datetime]:
+            nonlocal jump_calls
+            jump_calls += 1
+            if jump_calls > 1:
+                raise KeyboardInterrupt
+            # time_to_jump = 3, so total_time = max(0, 3 - 6) = 0 after fix
+            # Before fix total_time = -3; in both cases countdown loop is skipped.
+            return 3, jump_time
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(main, "jump_to_system", side_effect=fake_jump), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            try:
+                _ = main._run_traversal_slot(context)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+
+        # Both systems were attempted; countdown was skipped for the first.
+        assert jump_calls == 2
+
+    def test_countdown_uses_cancel_aware_runtime_waits(self, tmp_path: Path) -> None:
+        """Countdown and next-jump waits go through runtime_context.wait(),
+        NOT through time.sleep(1).
+
+        Before the fix: time.sleep(1) is used in countdown loops, so
+        time_sleep_calls contains 1.0 entries.  After the fix: countdown
+        waits use runtime_context.wait(1) and time.sleep is only used for
+        Discord rate-limiting sleeps (2.0 s).
+        """
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.return_value = False
+
+        jump_time = datetime.datetime.now(datetime.timezone.utc)
+        jump_calls = 0
+
+        def fake_jump(*_a: object, **_kw: object) -> tuple[int, datetime.datetime]:
+            nonlocal jump_calls
+            jump_calls += 1
+            if jump_calls > 1:
+                raise KeyboardInterrupt
+            # time_to_jump = 10 → total_time = max(0, 10 - 6) = 4
+            return 10, jump_time
+
+        time_sleep_calls: list[float] = []
+
+        def track_time_sleep(seconds: float) -> None:
+            time_sleep_calls.append(seconds)
+
+        context = _make_runtime_context(
+            options=_make_options(tmp_path),
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(main, "load_route_list", return_value=["A", "B"]), \
+             patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(main, "jump_to_system", side_effect=fake_jump), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = track_time_sleep
+            try:
+                _ = main._run_traversal_slot(context)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+
+        # After fix: countdown waits use runtime_context.wait(1), not
+        # time.sleep(1).  The only time.sleep calls should be Discord
+        # rate-limiting sleeps at 2.0 s.  Before the fix, 1.0 entries
+        # appear from the main countdown and next-jump countdown loops.
+        assert 1.0 not in time_sleep_calls, (
+            f"Countdown waits should use runtime_context.wait(), "
+            f"not time.sleep(1). Got time.sleep calls: {time_sleep_calls}"
+        )
+
+        # Discord sleeps (2.0) are still time.sleep — unchanged.
+        assert 2.0 in time_sleep_calls, (
+            "Discord rate-limiting sleeps should still use time.sleep(2)"
+        )
+
+
+def test_short_jump_countdown_clamps_to_zero(tmp_path: Path) -> None:
+    TestCountdownHardening().test_short_jump_countdown_clamps_to_zero(tmp_path)
+
+
+def test_countdown_uses_cancel_aware_runtime_waits(tmp_path: Path) -> None:
+    TestCountdownHardening().test_countdown_uses_cancel_aware_runtime_waits(tmp_path)
