@@ -12,18 +12,6 @@ A refactored fork of [mck-9061/CATS](https://github.com/mck-9061/CATS).
 
 <br>
 
-```
- ┌──────────────────────────────────────────────────────────┐
- │                                                          │
- │    ┌─┐  ┌─┐ ┌───┐ ┌───┐ ┌───┐ ┌─┐ ┌─┐ ┌─┐ ┌─┐        │
- │    │ └──┘ │ │   │ │   │ │ ┌─┘ │ │ │ │ │ │  ╰─╯        │
- │    │  ┌─┐ │ │   │ │   │ │ │   │ │ │ │ │ │  ┌─┐        │
- │    │  │ │ │ │   │ │   │ │ └─┐ │ │ │ │ │ │  │ │        │
- │    └──┘ └─┘ └───┘ └───┘ └───┘ └─┘ └─┘ └─┘ └─┘        │
- │                                                          │
- └──────────────────────────────────────────────────────────┘
-```
-
 ### Graphical Dashboard &nbsp;·&nbsp; Multi-Carrier Coordination &nbsp;·&nbsp; Autonomous Traversal
 
 Manage multiple fleet carriers simultaneously through a native GUI dashboard.
