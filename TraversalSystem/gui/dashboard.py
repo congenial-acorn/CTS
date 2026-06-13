@@ -5,6 +5,7 @@ Blocked slots remain visible with exact skip reasons for machine-testable logs.
 """
 from __future__ import annotations
 
+import datetime
 from typing import cast
 from collections.abc import Callable
 
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QScrollArea, QFrame, QTextEdit, QDialog, QListWidget, QListWidgetItem,
     QDialogButtonBox,
-    QMessageBox,
+    QMessageBox, QGroupBox,
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QSize, Slot
 
@@ -24,6 +25,7 @@ from TraversalSystem.gui.worker_state import WorkerState
 from TraversalSystem.window_capture import capture_window, create_placeholder
 from TraversalSystem.window_manager import WindowInfo
 from TraversalSystem.gui.theme import ED_DARK_BG, ED_PANEL_BG, ED_ORANGE, ED_TEXT, ED_BORDER
+from TraversalSystem.gui.scheduled_jump import ScheduledJumpController
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +344,28 @@ class DashboardSlotWidget(QFrame):
         self.log_area.setMaximumHeight(100)
         layout.addWidget(self.log_area)
         
+        # Scheduled Jump section
+        self.scheduled_jump_group = QGroupBox("Scheduled Jump")
+        sj_layout = QHBoxLayout(self.scheduled_jump_group)
+        
+        self.sj_time_label = QLabel(
+            slot_config.scheduled_jump_time or "Not configured"
+        )
+        sj_layout.addWidget(QLabel("Time:"))
+        sj_layout.addWidget(self.sj_time_label)
+        
+        self.sj_countdown_label = QLabel("--:--:--")
+        sj_layout.addWidget(self.sj_countdown_label)
+        
+        self.sj_schedule_btn = QPushButton("Schedule")
+        self.sj_cancel_btn = QPushButton("Cancel")
+        self.sj_cancel_btn.setEnabled(False)
+        sj_layout.addWidget(self.sj_schedule_btn)
+        sj_layout.addWidget(self.sj_cancel_btn)
+        sj_layout.addStretch()
+        
+        layout.addWidget(self.scheduled_jump_group)
+        
         # Connect enable/disable button
         self.enable_disable_btn.clicked.connect(self._on_enable_disable_toggle)
         
@@ -389,6 +413,16 @@ class DashboardSlotWidget(QFrame):
             self.is_enabled and 
             self.current_state is WorkerState.UNBOUND
         )
+        
+        # Scheduled jump button state
+        self.sj_schedule_btn.setEnabled(
+            bool(self.slot_config.scheduled_jump_time)
+            and self.slot_config.scheduled_jump_button_x > 0
+            and self.slot_config.scheduled_jump_button_y > 0
+            and self.is_enabled
+            and self.current_state is WorkerState.READY
+        )
+        self.sj_cancel_btn.setEnabled(False)
     
     def set_state(self, state: WorkerState, blocked_reason: str = "") -> None:
         """Update the widget state and UI."""
@@ -412,6 +446,28 @@ class DashboardSlotWidget(QFrame):
         Logs are machine-testable - no timestamps, just plain messages.
         """
         self.log_area.append(message)
+    
+    def set_scheduled_state(self, status: str) -> None:
+        """Update scheduled jump button states and display."""
+        if status == "scheduled":
+            self.sj_schedule_btn.setEnabled(False)
+            self.sj_cancel_btn.setEnabled(True)
+        elif status in ("completed", "cancelled", "failed", "idle"):
+            self.sj_schedule_btn.setEnabled(
+                bool(self.slot_config.scheduled_jump_time)
+                and self.slot_config.scheduled_jump_button_x > 0
+                and self.slot_config.scheduled_jump_button_y > 0
+                and self.is_enabled
+                and self.current_state is WorkerState.READY
+            )
+            self.sj_cancel_btn.setEnabled(False)
+            self.sj_countdown_label.setText("--:--:--")
+        elif status == "focusing":
+            self.sj_countdown_label.setText("FOCUSING...")
+
+    def update_countdown(self, text: str) -> None:
+        """Update the countdown display."""
+        self.sj_countdown_label.setText(text)
     
     def set_status(self, status: str, blocked_reason: str = "") -> None:
         """Legacy method - use set_state instead."""
@@ -449,6 +505,7 @@ class DashboardWidget(QWidget):
         self.worker_controller = worker_controller
         self.slot_widgets: dict[int, DashboardSlotWidget] = {}
         self.binding_snapshots: dict[int, BindingSnapshot] = {}
+        self._scheduled_controllers: dict[int, ScheduledJumpController] = {}
         
         layout = QVBoxLayout(self)
         
@@ -499,6 +556,8 @@ class DashboardWidget(QWidget):
             widget.manual_bind_btn.clicked.connect(lambda _, i=idx: self._on_manual_bind(i))
             widget.use_discovered_btn.clicked.connect(lambda _, i=idx: self._on_use_discovered(i))
             widget.enabled_changed.connect(self._on_slot_enabled_changed)
+            widget.sj_schedule_btn.clicked.connect(lambda _, i=idx: self._on_schedule_jump(i))
+            widget.sj_cancel_btn.clicked.connect(lambda _, i=idx: self._on_cancel_scheduled_jump(i))
     
     def _update_classification(self) -> None:
         """Update slot classifications from binding controller."""
@@ -553,7 +612,71 @@ class DashboardWidget(QWidget):
         for idx in stopped:
             if idx in self.slot_widgets:
                 self.slot_widgets[idx].append_log(f"Slot {idx} stopped via Stop All")
-    
+
+    def _on_schedule_jump(self, slot_index: int) -> None:
+        """Create and start a ScheduledJumpController for the given slot."""
+        slot = self.config.carrier_slots[slot_index]
+        if not slot.scheduled_jump_time:
+            self.slot_widgets[slot_index].append_log("Scheduled jump: no time configured")
+            return
+
+        snapshot = self.binding_snapshots.get(slot_index)
+        if not snapshot or not snapshot.window_binding:
+            self.slot_widgets[slot_index].append_log("Scheduled jump: slot not bound to window")
+            self.slot_widgets[slot_index].set_scheduled_state("failed")
+            return
+
+        if slot.scheduled_jump_button_x == 0 or slot.scheduled_jump_button_y == 0:
+            self.slot_widgets[slot_index].append_log("Scheduled jump: button coordinates not set")
+            return
+
+        parts = slot.scheduled_jump_time.split(":")
+        if len(parts) != 3:
+            self.slot_widgets[slot_index].append_log(f"Scheduled jump: invalid time format '{slot.scheduled_jump_time}'")
+            return
+        try:
+            target_time = datetime.time(int(parts[0]), int(parts[1]), int(parts[2]))
+        except ValueError:
+            self.slot_widgets[slot_index].append_log(f"Scheduled jump: invalid time '{slot.scheduled_jump_time}'")
+            return
+
+        # Cancel existing controller for this slot if any
+        old = self._scheduled_controllers.pop(slot_index, None)
+        if old:
+            old.cancel()
+
+        controller = ScheduledJumpController(parent=self)
+
+        widget = self.slot_widgets[slot_index]
+        controller.countdown_updated.connect(widget.update_countdown)
+        controller.status_changed.connect(widget.set_scheduled_state)
+
+        def on_status(status: str) -> None:
+            widget.append_log(f"Scheduled jump: {status}")
+            if status in ("completed", "cancelled", "failed"):
+                self._scheduled_controllers.pop(slot_index, None)
+        controller.status_changed.connect(on_status)
+
+        try:
+            controller.schedule(
+                target_utc=target_time,
+                button_x=slot.scheduled_jump_button_x,
+                button_y=slot.scheduled_jump_button_y,
+                binding=snapshot.window_binding,
+            )
+            self._scheduled_controllers[slot_index] = controller
+            widget.append_log(f"Scheduled jump: set for {slot.scheduled_jump_time} UTC")
+        except ValueError as exc:
+            widget.append_log(f"Scheduled jump: {exc}")
+            widget.set_scheduled_state("failed")
+
+    def _on_cancel_scheduled_jump(self, slot_index: int) -> None:
+        """Cancel a running scheduled jump for the given slot."""
+        controller = self._scheduled_controllers.pop(slot_index, None)
+        if controller:
+            controller.cancel()
+            self.slot_widgets[slot_index].append_log("Scheduled jump: cancelled")
+
     def _on_start_slot(self, slot_index: int) -> None:
         """Handle per-slot Start button click."""
         if self.worker_controller.start_slot(slot_index):

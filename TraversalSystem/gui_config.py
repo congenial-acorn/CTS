@@ -112,6 +112,12 @@ class CarrierSlotConfig:
     #: Slot binding state: ``"unbound"`` or ``"ready"``.
     state: str = "unbound"
     is_squadron_carrier: bool = False
+    #: UTC time for scheduled jump (HH:MM:SS). Empty string = disabled.
+    scheduled_jump_time: str = ""
+    #: X-coordinate on screen for the jump button click.
+    scheduled_jump_button_x: int = 0
+    #: Y-coordinate on screen for the jump button click.
+    scheduled_jump_button_y: int = 0
 
     def is_bound(self) -> bool:
         """Return True when the slot has a resolved, known FID."""
@@ -308,6 +314,9 @@ def _parse_slot(index: int, data: Dict[str, Any]) -> CarrierSlotConfig:
         shutdown_on_complete=bool(data.get("shutdown_on_complete", True)),
         state=str(data.get("state", "unbound")),
         is_squadron_carrier=bool(data.get("is_squadron_carrier", False)),
+        scheduled_jump_time=str(data.get("scheduled_jump_time", "")),
+        scheduled_jump_button_x=int(data.get("scheduled_jump_button_x", 0)),
+        scheduled_jump_button_y=int(data.get("scheduled_jump_button_y", 0)),
     )
 
 
@@ -513,6 +522,9 @@ def _slot_to_dict(slot: CarrierSlotConfig) -> Dict[str, Any]:
         "shutdown_on_complete": slot.shutdown_on_complete,
         "state": slot.state,
         "is_squadron_carrier": slot.is_squadron_carrier,
+        "scheduled_jump_time": slot.scheduled_jump_time,
+        "scheduled_jump_button_x": slot.scheduled_jump_button_x,
+        "scheduled_jump_button_y": slot.scheduled_jump_button_y,
     }
 
 

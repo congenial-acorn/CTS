@@ -1,8 +1,9 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, 
-    QLineEdit, QCheckBox, QSpinBox, QComboBox, QPushButton, QLabel
+    QLineEdit, QCheckBox, QSpinBox, QComboBox, QPushButton, QLabel,
+    QTimeEdit, QGroupBox
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTime
 from TraversalSystem.gui_config import CarrierSlotConfig
 
 class SlotEditorWidget(QWidget):
@@ -61,6 +62,25 @@ class SlotEditorWidget(QWidget):
         self.shutdown_check = QCheckBox("Shutdown on Complete")
         self.form_layout.addRow("", self.shutdown_check)
 
+        # Scheduled Jump group
+        scheduled_group = QGroupBox("Scheduled Jump")
+        sj_layout = QFormLayout(scheduled_group)
+
+        self.scheduled_jump_time_input = QTimeEdit()
+        self.scheduled_jump_time_input.setDisplayFormat("HH:mm:ss")
+        self.scheduled_jump_time_input.setTime(QTime(0, 0, 0))
+        sj_layout.addRow("Jump Time (UTC):", self.scheduled_jump_time_input)
+
+        self.scheduled_jump_x_spin = QSpinBox()
+        self.scheduled_jump_x_spin.setRange(0, 3840)
+        sj_layout.addRow("Button X:", self.scheduled_jump_x_spin)
+
+        self.scheduled_jump_y_spin = QSpinBox()
+        self.scheduled_jump_y_spin.setRange(0, 2160)
+        sj_layout.addRow("Button Y:", self.scheduled_jump_y_spin)
+
+        self.form_layout.addRow(scheduled_group)
+
         layout.addLayout(self.form_layout)
 
         self.status_label = QLabel()
@@ -101,6 +121,13 @@ class SlotEditorWidget(QWidget):
         self.single_discord_check.setChecked(slot.single_discord_message)
         self.shutdown_check.setChecked(slot.shutdown_on_complete)
         
+        if slot.scheduled_jump_time:
+            t = QTime.fromString(slot.scheduled_jump_time, "HH:mm:ss")
+            if t.isValid():
+                self.scheduled_jump_time_input.setTime(t)
+        self.scheduled_jump_x_spin.setValue(slot.scheduled_jump_button_x)
+        self.scheduled_jump_y_spin.setValue(slot.scheduled_jump_button_y)
+        
         self._update_validation()
 
     def _clear_fields(self):
@@ -118,6 +145,9 @@ class SlotEditorWidget(QWidget):
         self.power_saving_check.setChecked(False)
         self.single_discord_check.setChecked(False)
         self.shutdown_check.setChecked(True)
+        self.scheduled_jump_time_input.setTime(QTime(0, 0, 0))
+        self.scheduled_jump_x_spin.setValue(0)
+        self.scheduled_jump_y_spin.setValue(0)
         self.status_label.setText("")
 
     def _update_validation(self):
@@ -149,6 +179,10 @@ class SlotEditorWidget(QWidget):
         self._current_slot.power_saving = self.power_saving_check.isChecked()
         self._current_slot.single_discord_message = self.single_discord_check.isChecked()
         self._current_slot.shutdown_on_complete = self.shutdown_check.isChecked()
+        
+        self._current_slot.scheduled_jump_time = self.scheduled_jump_time_input.time().toString("HH:mm:ss")
+        self._current_slot.scheduled_jump_button_x = self.scheduled_jump_x_spin.value()
+        self._current_slot.scheduled_jump_button_y = self.scheduled_jump_y_spin.value()
         
         # Fail-closed: editor saves always land in unbound. Only the
         # binding controller (journal discovery) can promote to ready.
