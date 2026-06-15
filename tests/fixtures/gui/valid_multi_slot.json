@@ -8,8 +8,7 @@
     "focus_timeout_seconds": 5,
     "ambiguous_window_policy": "manual",
     "single_discord_message": true,
-    "shutdown_on_complete": false,
-    "power_saving": false
+    "shutdown_on_complete": false
   },
   "carrier_slots": [
     {

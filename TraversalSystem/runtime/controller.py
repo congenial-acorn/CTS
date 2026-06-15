@@ -67,7 +67,6 @@ def coerce_traversal_options(
         tritium_slot=_as_int(mapping.get("tritium_slot"), 0),
         auto_plot_jumps=bool(mapping.get("auto_plot_jumps", True)),
         disable_refuel=bool(mapping.get("disable_refuel", False)),
-        power_saving=bool(mapping.get("power_saving", False)),
         refuel_mode=_as_int(mapping.get("refuel_mode"), 0),
         single_discord_message=bool(mapping.get("single_discord_message", False)),
         shutdown_on_complete=bool(mapping.get("shutdown_on_complete", True)),

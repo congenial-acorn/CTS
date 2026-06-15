@@ -32,7 +32,6 @@ from TraversalSystem.gui_config import (
 _UNIVERSAL_KEYS: Dict[str, str] = {
     "webhook_url": "webhook_url",
     "journal_directory": "journal_directory",
-    "power-saving": "power_saving",
     "single-discord-message": "single_discord_message",
     "shutdown-on-complete": "shutdown_on_complete",
     "multi-commander-enabled": "multi_commander_enabled",
@@ -152,7 +151,6 @@ def import_legacy_settings(path: Path | str) -> GuiConfig:
         shutdown_on_complete=_as_bool(
             raw.get("shutdown-on-complete"), default=True
         ),
-        power_saving=_as_bool(raw.get("power-saving"), default=False),
     )
 
     # -- Resolve relative route_file against INI location --
@@ -248,7 +246,6 @@ def export_legacy_settings(
         f"route_position={slot.route_position}",
         f"auto-plot-jumps={'true' if slot.auto_plot_jumps else 'false'}",
         f"disable-refuel={'true' if slot.disable_refuel else 'false'}",
-        f"power-saving={'true' if uni.power_saving else 'false'}",
         f"refuel-mode={slot.refuel_mode}",
         f"single-discord-message={'true' if uni.single_discord_message else 'false'}",
         f"shutdown-on-complete={'true' if uni.shutdown_on_complete else 'false'}",

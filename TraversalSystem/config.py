@@ -84,7 +84,6 @@ class TraversalOptions:
     tritium_slot: int = 0
     auto_plot_jumps: bool = True
     disable_refuel: bool = False
-    power_saving: bool = False
     refuel_mode: int = 0
     single_discord_message: bool = False
     shutdown_on_complete: bool = True
@@ -124,7 +123,6 @@ def load_settings(
         tritium_slot=_as_int(settings_values.get("tritium_slot"), default=0),
         auto_plot_jumps=_as_bool(settings_values.get("auto-plot-jumps"), default=True),
         disable_refuel=_as_bool(settings_values.get("disable-refuel"), default=False),
-        power_saving=_as_bool(settings_values.get("power-saving"), default=False),
         refuel_mode=_as_int(settings_values.get("refuel-mode"), default=0),
         single_discord_message=_as_bool(
             settings_values.get("single-discord-message"), default=False

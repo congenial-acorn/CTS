@@ -103,12 +103,8 @@ class CarrierSlotConfig:
     disable_refuel: bool = False
     #: Whether this slot participates in mass-start (Start All).
     enabled: bool = True
-    #: Per-slot power-saving override (close/reopen game between jumps).
-    power_saving: bool = False
     #: Per-slot single Discord message override (edit one message vs. many posts).
     single_discord_message: bool = False
-    #: Per-slot shutdown-on-complete override.
-    shutdown_on_complete: bool = True
     #: Slot binding state: ``"unbound"`` or ``"ready"``.
     state: str = "unbound"
     is_squadron_carrier: bool = False
@@ -146,8 +142,6 @@ class UniversalSettings:
     single_discord_message: bool = False
     #: Whether to shut down the system when the route completes.
     shutdown_on_complete: bool = True
-    #: Power-saving mode (close/reopen game between jumps).
-    power_saving: bool = False
 
 
 @dataclass(slots=True)
@@ -290,7 +284,6 @@ def _parse_universal(data: Dict[str, Any]) -> UniversalSettings:
         ambiguous_window_policy=str(data.get("ambiguous_window_policy", "abort")),
         single_discord_message=bool(data.get("single_discord_message", False)),
         shutdown_on_complete=bool(data.get("shutdown_on_complete", True)),
-        power_saving=bool(data.get("power_saving", False)),
     )
 
 
@@ -309,9 +302,7 @@ def _parse_slot(index: int, data: Dict[str, Any]) -> CarrierSlotConfig:
         auto_plot_jumps=bool(data.get("auto_plot_jumps", True)),
         disable_refuel=bool(data.get("disable_refuel", False)),
         enabled=bool(data.get("enabled", True)),
-        power_saving=bool(data.get("power_saving", False)),
         single_discord_message=bool(data.get("single_discord_message", False)),
-        shutdown_on_complete=bool(data.get("shutdown_on_complete", True)),
         state=str(data.get("state", "unbound")),
         is_squadron_carrier=bool(data.get("is_squadron_carrier", False)),
         scheduled_jump_time=str(data.get("scheduled_jump_time", "")),
@@ -517,9 +508,7 @@ def _slot_to_dict(slot: CarrierSlotConfig) -> Dict[str, Any]:
         "auto_plot_jumps": slot.auto_plot_jumps,
         "disable_refuel": slot.disable_refuel,
         "enabled": slot.enabled,
-        "power_saving": slot.power_saving,
         "single_discord_message": slot.single_discord_message,
-        "shutdown_on_complete": slot.shutdown_on_complete,
         "state": slot.state,
         "is_squadron_carrier": slot.is_squadron_carrier,
         "scheduled_jump_time": slot.scheduled_jump_time,
@@ -539,7 +528,6 @@ def _universal_to_dict(uni: UniversalSettings) -> Dict[str, Any]:
         "ambiguous_window_policy": uni.ambiguous_window_policy,
         "single_discord_message": uni.single_discord_message,
         "shutdown_on_complete": uni.shutdown_on_complete,
-        "power_saving": uni.power_saving,
     }
 
 
