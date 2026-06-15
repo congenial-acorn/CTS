@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 # Force offscreen rendering for all Qt tests so no display is needed.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 # ---------------------------------------------------------------------------
 # Root fixture directory (checked into the tree for deterministic data)
