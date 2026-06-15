@@ -242,6 +242,7 @@ def follow_button_sequence(
     *,
     focus_handler: InputHandlerAdapter | None = None,
     runtime_context: TraversalRuntimeContext | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     handler = _resolve_input_handler(focus_handler)
     sequence_path = sequence_dir / sequence_name
@@ -262,6 +263,7 @@ def follow_button_sequence(
                 _wait_for_duration(
                     float(duration),
                     runtime_context=runtime_context,
+                    cancel_event=cancel_event,
                 )
             finally:
                 handler.keyUp(key)
@@ -277,6 +279,7 @@ def follow_button_sequence(
             _wait_for_duration(
                 wait_time,
                 runtime_context=runtime_context,
+                cancel_event=cancel_event,
             )
 
 
@@ -702,6 +705,7 @@ def open_game(
             SEQUENCE_DIR,
             "start_game.txt",
             focus_handler=handler,
+            cancel_event=cancel_event,
         )
 
         loaded = False
