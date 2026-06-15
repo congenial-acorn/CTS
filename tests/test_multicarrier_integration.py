@@ -108,6 +108,20 @@ def _load_main_with_mocks(tmp_path: Path) -> object:
                 sys.modules[name] = original
 
 
+class _ManualClock:
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
+
+
 # ---------------------------------------------------------------------------
 # test_scan_loop_updates_selected_commander_state
 # ---------------------------------------------------------------------------
@@ -393,6 +407,56 @@ def test_lost_window_invalidates_binding_and_blocks_automation(
     TestLostWindowInvalidatesBinding().test_lost_window_invalidates_binding_and_blocks_automation(tmp_path)
 
 
+class TestPowerSavingCooldownTiming:
+    def test_power_saving_reopen_210s_leaves_expected_remaining_cooldown(
+        self, tmp_path: Path,
+    ) -> None:
+        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
+            tmp_path,
+            game_ready_after=210.0,
+        )
+
+        assert result is False
+        assert registered_remaining[0] == pytest.approx(362.0)
+        assert registered_remaining[-1] == pytest.approx(152.0, abs=2.0)
+
+    def test_power_saving_reopen_250s_uses_elapsed_time_not_hardcoded_152(
+        self, tmp_path: Path,
+    ) -> None:
+        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
+            tmp_path,
+            game_ready_after=250.0,
+        )
+
+        assert result is False
+        assert registered_remaining[0] == pytest.approx(362.0)
+        assert registered_remaining[-1] == pytest.approx(112.0, abs=2.0)
+
+    def test_power_saving_reopen_past_full_cooldown_clamps_remaining_to_zero(
+        self, tmp_path: Path,
+    ) -> None:
+        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
+            tmp_path,
+            game_ready_after=400.0,
+        )
+
+        assert result is False
+        assert registered_remaining[0] == pytest.approx(362.0)
+        assert registered_remaining == [pytest.approx(362.0)]
+
+    def test_power_saving_wait_still_honors_jump_cancellation(
+        self, tmp_path: Path,
+    ) -> None:
+        _registered_remaining, saved_indices, result = _run_power_saving_cooldown_cycle(
+            tmp_path,
+            game_ready_after=None,
+            cancel_after=150.0,
+        )
+
+        assert result is False
+        assert saved_indices == [0]
+
+
 # ---------------------------------------------------------------------------
 # Task 5: traversal-level facade integration
 # ---------------------------------------------------------------------------
@@ -651,6 +715,129 @@ def _make_options(tmp_path: Path) -> TraversalOptions:
         single_discord_message=False,
         shutdown_on_complete=False,
     )
+
+
+def _run_power_saving_cooldown_cycle(
+    tmp_path: Path,
+    *,
+    game_ready_after: float | None,
+    cancel_after: float | None = None,
+) -> tuple[list[float], list[int], bool]:
+    main = _load_main_with_mocks(tmp_path)
+    clock = _ManualClock()
+    registered_remaining: list[float] = []
+    saved_indices: list[int] = []
+    scheduled_state: list[object | None] = [None]
+    cooldown_started_at: list[float | None] = [None]
+
+    class _RecordingSequenceQueue(_FakeSequenceQueue):
+        def register_jump_deadline(self, *, slot_id: str, deadline: float) -> None:
+            super().register_jump_deadline(slot_id=slot_id, deadline=deadline)
+            if cooldown_started_at[0] is None:
+                cooldown_started_at[0] = clock.now()
+            registered_remaining.append(deadline - clock.now())
+
+    class _FakeTimer:
+        def __init__(self, _delay: float, _fn: object, args: tuple[object, ...] = ()) -> None:
+            scheduled_state[0] = args[0] if args else None
+
+        def start(self) -> None:
+            return None
+
+    queue = _RecordingSequenceQueue()
+    journal = MagicMock(spec=CTSJournalFacade)
+    journal.has_jumped.return_value = False
+    journal.reset_jump.return_value = None
+    journal.reset_cancel.return_value = None
+    journal.jump_cancelled.side_effect = (
+        lambda: cancel_after is not None and clock.now() >= cancel_after
+    )
+
+    options = _make_options(tmp_path)
+    options.power_saving = True
+
+    context = _make_runtime_context(
+        options=options,
+        sequence_queue=queue,
+        journal=journal,
+        slot_id=0,
+        sleep=lambda _seconds: None,
+    )
+    context.cancel_event.wait = lambda timeout=None: _advance_power_saving_clock(
+        clock,
+        0.0 if timeout is None else timeout,
+        scheduled_state=scheduled_state,
+        cooldown_started_at=cooldown_started_at,
+        game_ready_after=game_ready_after,
+    )  # type: ignore[assignment]
+
+    jump_calls = 0
+
+    def fake_jump(*_args: object, **_kwargs: object) -> tuple[int, datetime.datetime]:
+        nonlocal jump_calls
+        jump_calls += 1
+        if jump_calls > 1:
+            raise KeyboardInterrupt
+        return 10, datetime.datetime.now(datetime.timezone.utc)
+
+    def track_save(state: object, **_kwargs: object) -> None:
+        saved_indices.append(getattr(state, "line_no"))
+
+    with patch("builtins.print"), \
+         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+         patch.object(main, "Reshandler", _FakeResHandler), \
+         patch.object(main, "load_route_list", return_value=["A", "B"]), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+         patch.object(main, "consume_save", return_value=None), \
+         patch.object(main, "save_progress", side_effect=track_save), \
+         patch.object(main, "jump_to_system", side_effect=fake_jump), \
+         patch.object(main, "restock_tritium"), \
+         patch.object(main, "follow_button_sequence"), \
+         patch.object(main, "get_game_process_names", return_value=[]), \
+         patch.object(main.psutil, "process_iter", return_value=[], create=True), \
+         patch.object(main.threading, "Timer", _FakeTimer), \
+         patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
+         patch.object(main, "time") as fake_time:
+        fake_time.monotonic.side_effect = clock.now
+        fake_time.sleep.side_effect = lambda _s: None
+        try:
+            result = main._run_traversal_slot(context)
+        except (KeyboardInterrupt, SystemExit):
+            result = False
+
+    return registered_remaining, saved_indices, result
+
+
+def _advance_power_saving_clock(
+    clock: _ManualClock,
+    seconds: float,
+    *,
+    scheduled_state: list[object | None],
+    cooldown_started_at: list[float | None],
+    game_ready_after: float | None,
+) -> bool:
+    current = clock.now()
+    ready_at = (
+        None
+        if game_ready_after is None or cooldown_started_at[0] is None
+        else cooldown_started_at[0] + game_ready_after
+    )
+    advance_by = seconds
+    if (
+        ready_at is not None
+        and scheduled_state[0] is not None
+        and not getattr(scheduled_state[0], "game_ready", False)
+        and current < ready_at <= current + seconds
+    ):
+        advance_by = ready_at - current
+    clock.advance(advance_by)
+    if (
+        ready_at is not None
+        and scheduled_state[0] is not None
+        and clock.now() >= ready_at
+    ):
+        setattr(scheduled_state[0], "game_ready", True)
+    return False
 
 
 def _run_restock_cycle(

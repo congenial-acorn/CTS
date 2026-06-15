@@ -720,6 +720,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
     progress_saved = False
     registered_jump_deadline = False
     next_jump_plot_deadline: float | None = None
+    cooldown_deadline: float | None = None
     queue_slot_id = f"slot-{slot_id}" if slot_id is not None else None
 
     def maybe_save_progress() -> None:
@@ -1019,6 +1020,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             else:
                 print("Counting down until next jump...")
                 total_time = 362
+                cooldown_deadline = time.monotonic() + 362.0
                 if idx + 1 < len(route_list):
                     register_next_jump_deadline(total_time)
                 while total_time > 0:
@@ -1052,7 +1054,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                         return _handle_jump_cancelled(system, revert_index=True)
                                     print("Game not ready...")
                                     runtime_context.wait(10)
-                                total_time = 152
+                                assert cooldown_deadline is not None
+                                total_time = max(0, int(cooldown_deadline - time.monotonic()))
                             print("Jump complete!")
                             runtime_context.transition("running")
                             discord_messenger.update_fields(8, 7)
