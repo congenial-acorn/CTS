@@ -161,6 +161,20 @@ class _InlineJumpQueue:
         return _InlineHandle(run)
 
 
+class _ManualClock:
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+        self._lock = threading.Lock()
+
+    def now(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
+
+
 def _make_runtime_context(
     *,
     options: TraversalOptions,
@@ -233,6 +247,260 @@ def _record_jump_submissions(queue: SequenceQueue) -> list[dict[str, object]]:
 
     setattr(queue, "submit_jump_plot", wrapped_submit_jump_plot)
     return calls
+
+
+def _assert_pending_jump_restock_order(
+    tmp_path: Path,
+    *,
+    jump_deadline: float,
+    expected_order: list[str],
+) -> list[dict[str, object]]:
+    main = _load_main_with_mocks(tmp_path)
+    clock = _ManualClock()
+    queue = SequenceQueue(time_fn=clock.now)
+    options = _make_options(tmp_path)
+    runtime_context = _RuntimeContextStub()
+    active_started = threading.Event()
+    release_active = threading.Event()
+    jump_submitted = threading.Event()
+    jump_finished = threading.Event()
+    execution_order: list[str] = []
+    submit_calls: list[dict[str, object]] = []
+    jump_result: dict[str, tuple[int, datetime.datetime | int]] = {}
+    jump_error: dict[str, BaseException] = {}
+    departure = datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc)
+
+    submit_jump_plot = queue.submit_jump_plot
+
+    def wrapped_submit_jump_plot(
+        *,
+        slot_id: str,
+        run: Callable[[], object],
+        deadline: float,
+        estimated_duration: float,
+        cancel_event: threading.Event | None = None,
+    ) -> object:
+        submit_calls.append({
+            "slot_id": slot_id,
+            "deadline": deadline,
+            "estimated_duration": estimated_duration,
+            "cancel_event": cancel_event,
+        })
+        if slot_id == "slot-jump":
+            jump_submitted.set()
+        return submit_jump_plot(
+            slot_id=slot_id,
+            run=run,
+            deadline=deadline,
+            estimated_duration=estimated_duration,
+            cancel_event=cancel_event,
+        )
+
+    setattr(queue, "submit_jump_plot", wrapped_submit_jump_plot)
+
+    def active_blocker() -> str:
+        execution_order.append("active")
+        active_started.set()
+        assert release_active.wait(1.0)
+        return "active"
+
+    def fake_jump_to_system(
+        system_name: str,
+        _options: TraversalOptions,
+        _res_handler: object,
+        _journal: object,
+        _sequence_dir: Path,
+        _runtime_context: TraversalRuntimeContext,
+        focus_handler: object | None = None,
+    ) -> tuple[int, datetime.datetime]:
+        _ = focus_handler
+        execution_order.append("jump")
+        return 42, departure
+
+    def restock() -> str:
+        execution_order.append("restock")
+        clock.advance(60.0)
+        return "restock"
+
+    def run_jump() -> None:
+        try:
+            jump_result["result"] = main._run_coordinated_jump_plot(
+                sequence_queue=queue,
+                queue_slot_id="slot-jump",
+                system_name="Sol",
+                options=options,
+                res_handler=MagicMock(),
+                journal=MagicMock(),
+                sequence_dir=tmp_path,
+                runtime_context=runtime_context,
+                focus_handler=None,
+                deadline=jump_deadline,
+            )
+        except BaseException as exc:
+            jump_error["error"] = exc
+        finally:
+            jump_finished.set()
+
+    jump_thread = threading.Thread(target=run_jump)
+    jump_thread_started = False
+    restock_handle = None
+
+    with patch.object(main, "jump_to_system", side_effect=fake_jump_to_system):
+        try:
+            active_handle = queue.submit_jump_plot(
+                slot_id="slot-active",
+                run=active_blocker,
+                deadline=clock.now() + 1000.0,
+                estimated_duration=30.0,
+                cancel_event=threading.Event(),
+            )
+            assert active_started.wait(1.0)
+
+            jump_thread.start()
+            jump_thread_started = True
+
+            deadline_limit = time.monotonic() + 1.0
+            while (
+                not jump_submitted.is_set()
+                and not jump_finished.is_set()
+                and time.monotonic() < deadline_limit
+            ):
+                _ = jump_finished.wait(0.01)
+
+            if "error" in jump_error:
+                raise jump_error["error"]
+
+            assert jump_submitted.is_set()
+
+            restock_handle = queue.submit_restock(
+                slot_id="slot-restock",
+                estimated_duration=60.0,
+                run=restock,
+                cancel_event=threading.Event(),
+            )
+
+            release_active.set()
+
+            assert active_handle.done.wait(1.0)
+            assert restock_handle.done.wait(1.0)
+            jump_thread.join(timeout=2.0)
+
+            assert active_handle.result(timeout=0.1) == "active"
+            assert restock_handle.result(timeout=0.1) == "restock"
+        finally:
+            release_active.set()
+            if jump_thread_started and jump_thread.is_alive():
+                jump_thread.join(timeout=2.0)
+            queue.shutdown(wait=True)
+
+    if "error" in jump_error:
+        raise jump_error["error"]
+
+    assert jump_thread.is_alive() is False
+    assert jump_result["result"] == (42, departure)
+    assert execution_order == expected_order
+    return submit_calls
+
+
+def test_future_jump_deadline_allows_restock_to_run_before_pending_jump(
+    tmp_path: Path,
+) -> None:
+    jump_deadline = 300.0
+
+    submit_calls = _assert_pending_jump_restock_order(
+        tmp_path,
+        jump_deadline=jump_deadline,
+        expected_order=["active", "restock", "jump"],
+    )
+
+    jump_call = next(call for call in submit_calls if call["slot_id"] == "slot-jump")
+    assert jump_call["deadline"] == jump_deadline
+
+
+def test_soon_jump_deadline_defers_restock_until_after_pending_jump(
+    tmp_path: Path,
+) -> None:
+    jump_deadline = 30.0
+
+    submit_calls = _assert_pending_jump_restock_order(
+        tmp_path,
+        jump_deadline=jump_deadline,
+        expected_order=["active", "jump", "restock"],
+    )
+
+    jump_call = next(call for call in submit_calls if call["slot_id"] == "slot-jump")
+    assert jump_call["deadline"] == jump_deadline
+
+
+def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
+    tmp_path: Path,
+) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    clock = _ManualClock(start=1000.0)
+    options = _make_options(tmp_path)
+    journal = MagicMock()
+    journal.reset_cancel.return_value = None
+    journal.jump_cancelled.return_value = False
+    journal.has_jumped.return_value = True
+    departures = {
+        "Sol": datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc),
+        "Achenar": datetime.datetime(2999, 1, 2, tzinfo=datetime.timezone.utc),
+    }
+    queue = object()
+    runtime_context = _make_runtime_context(
+        options=options,
+        sequence_queue=queue,
+        journal=journal,
+        slot_id=0,
+        sleep=lambda _seconds: None,
+    )
+    runtime_context.cancel_event.wait = (  # type: ignore[assignment]
+        lambda timeout=None: clock.advance(float(timeout or 0.0)) or False
+    )
+    jump_calls: list[dict[str, object]] = []
+    registered_deadlines: list[float] = []
+
+    def fake_run_coordinated_jump_plot(
+        *,
+        system_name: str,
+        deadline: float | None = None,
+        **_kwargs: object,
+    ) -> tuple[int, datetime.datetime]:
+        jump_calls.append({
+            "system_name": system_name,
+            "deadline": deadline,
+            "seen_at": clock.now(),
+        })
+        return 6, departures[system_name]
+
+    def record_deadline(
+        _sequence_queue: object,
+        *,
+        slot_id: str,
+        deadline: float,
+    ) -> None:
+        assert slot_id == "slot-0"
+        registered_deadlines.append(deadline)
+
+    with patch("builtins.print"), \
+         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+         patch.object(main, "Reshandler", _FakeResHandler), \
+         patch.object(main, "load_route_list", return_value=["Sol", "Achenar"]), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+         patch.object(main, "consume_save", return_value=None), \
+         patch.object(main.time, "monotonic", side_effect=clock.now), \
+         patch.object(main.time, "sleep", side_effect=clock.advance), \
+         patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
+         patch.object(main, "_run_coordinated_restock"), \
+         patch.object(main, "_register_jump_deadline", side_effect=record_deadline), \
+         patch.object(main, "_clear_jump_deadline"):
+        assert main._run_traversal_slot(runtime_context) is True
+
+    assert [call["system_name"] for call in jump_calls] == ["Sol", "Achenar"]
+    assert jump_calls[0]["deadline"] == pytest.approx(jump_calls[0]["seen_at"])
+    assert registered_deadlines
+    assert jump_calls[1]["deadline"] == pytest.approx(registered_deadlines[-1])
+    assert cast(float, jump_calls[1]["deadline"]) < cast(float, jump_calls[1]["seen_at"])
 
 
 def test_concurrent_auto_jump_plot_serializes_queue_blocks(tmp_path: Path) -> None:

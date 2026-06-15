@@ -417,6 +417,7 @@ def _run_coordinated_jump_plot(
     sequence_dir: Path,
     runtime_context: TraversalRuntimeContext | None,
     focus_handler: InputHandlerAdapter | None,
+    deadline: float | None = None,
 ) -> Tuple[int, datetime.datetime | int]:
     """Run a coordinated jump plot sequence through the queue.
 
@@ -450,13 +451,15 @@ def _run_coordinated_jump_plot(
             focus_handler=focus_handler,
         )
 
+    effective_deadline = time.monotonic() if deadline is None else deadline
+
     if not options.auto_plot_jumps:
         handle = cast(
             SubmissionHandleAdapter,
             submit_jump_plot(
                 slot_id=queue_slot_id,
                 run=lambda: _prepare_manual_jump_plot(system_name),
-                deadline=time.monotonic(),
+                deadline=effective_deadline,
                 estimated_duration=DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS,
                 cancel_event=runtime_context.cancel_event,
             ),
@@ -481,7 +484,7 @@ def _run_coordinated_jump_plot(
                 runtime_context,
                 focus_handler=focus_handler,
             ),
-            deadline=time.monotonic(),
+            deadline=effective_deadline,
             estimated_duration=DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS,
             cancel_event=runtime_context.cancel_event,
         ),
@@ -716,6 +719,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
     route_length = 0
     progress_saved = False
     registered_jump_deadline = False
+    next_jump_plot_deadline: float | None = None
     queue_slot_id = f"slot-{slot_id}" if slot_id is not None else None
 
     def maybe_save_progress() -> None:
@@ -738,14 +742,15 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         registered_jump_deadline = False
 
     def register_next_jump_deadline(seconds_until_due: float) -> None:
-        nonlocal registered_jump_deadline
+        nonlocal registered_jump_deadline, next_jump_plot_deadline
         clear_registered_jump_deadline()
+        next_jump_plot_deadline = time.monotonic() + max(0.0, seconds_until_due)
         if queue_slot_id is None or sequence_queue is None:
             return
         _register_jump_deadline(
             sequence_queue,
             slot_id=queue_slot_id,
-            deadline=time.monotonic() + max(0.0, seconds_until_due),
+            deadline=next_jump_plot_deadline,
         )
         registered_jump_deadline = True
 
@@ -835,6 +840,13 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 departing_time: datetime.datetime | int = 0
                 while time_to_jump == 0 or departing_time == 0:
                     runtime_context.raise_if_cancelled()
+                    jump_plot_deadline = None
+                    if options.auto_plot_jumps:
+                        jump_plot_deadline = (
+                            next_jump_plot_deadline
+                            if next_jump_plot_deadline is not None
+                            else time.monotonic()
+                        )
                     time_to_jump, departing_time = _run_coordinated_jump_plot(
                         sequence_queue=sequence_queue,
                         queue_slot_id=queue_slot_id,
@@ -845,8 +857,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         sequence_dir=SEQUENCE_DIR,
                         runtime_context=runtime_context,
                         focus_handler=focus_dependency,
+                        deadline=jump_plot_deadline,
                     )
                 assert isinstance(departing_time, datetime.datetime)
+                next_jump_plot_deadline = None
 
                 formatted_time = str(datetime.timedelta(seconds=time_to_jump))
                 departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
