@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -761,5 +762,121 @@ def test_cancelling_blocked_restock_signals_completion_and_releases_later_work()
         with pytest.raises(cancelled_error):
             _ = blocked.result(timeout=0.1)
         assert execution_order == ["active", "restock-feasible"]
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_concurrent_carrier_submissions_preserve_serialization() -> None:
+    """Simultaneous submissions from multiple carriers must never overlap.
+
+    Four blocks (alternating jump/restock from different slot IDs) are
+    submitted concurrently. max_active must remain 1, proving the queue
+    serializes all automation blocks regardless of carrier origin.
+    """
+    clock = _ManualClock()
+    queue, _cancelled_error = _make_queue(clock)
+    release = threading.Event()
+    num_workers = 4
+    started_events = [threading.Event() for _ in range(num_workers)]
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def make_work(label: str, started: threading.Event) -> Callable[[], str]:
+        def run() -> str:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                started.set()
+                assert release.wait(2.0)
+                return label
+            finally:
+                with lock:
+                    active -= 1
+
+        return run
+
+    handles: list[_SubmissionHandle[str]] = []
+    try:
+        for i in range(num_workers):
+            if i % 2 == 0:
+                h = _submit_jump_plot(
+                    queue,
+                    slot_id=f"carrier-{i}",
+                    deadline=clock.now() + 100.0 + i * 10,
+                    estimated_duration=30.0,
+                    run=make_work(f"jump-{i}", started_events[i]),
+                )
+            else:
+                h = _submit_restock(
+                    queue,
+                    slot_id=f"carrier-{i}",
+                    estimated_duration=15.0,
+                    run=make_work(f"restock-{i}", started_events[i]),
+                )
+            handles.append(h)
+
+        first_started = False
+        deadline_check = 1.0
+        for _ in range(20):
+            if any(ev.is_set() for ev in started_events):
+                first_started = True
+                break
+            time.sleep(0.05)
+        assert first_started
+
+        num_started = sum(1 for ev in started_events if ev.is_set())
+        assert num_started == 1
+
+        release.set()
+
+        for h in handles:
+            assert h.done.wait(2.0)
+
+        assert max_active == 1
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_stale_deadline_pruning_prevents_indefinite_restock_starvation() -> None:
+    """Past-due registered deadlines must be pruned across cycles.
+
+    Verifies that stale deadlines from earlier cycles are removed by the
+    queue's internal pruning, preventing indefinite restock starvation.
+    Also confirms that over-estimate durations (restock longer than the
+    gap before the jump deadline) cannot register a past deadline that
+    wedges future restocks.
+    """
+    clock = _ManualClock(start=0.0)
+    queue, _cancelled_error = _make_queue(clock)
+
+    can_start_restock = getattr(queue, "can_start_restock", None)
+    register_deadline = getattr(queue, "register_jump_deadline", None)
+    clear_deadline = getattr(queue, "clear_jump_deadline", None)
+    if not callable(can_start_restock) or not callable(register_deadline):
+        pytest.fail("SequenceQueue must expose can_start_restock and register_jump_deadline")
+
+    try:
+        register_deadline(slot_id="slot-1", deadline=clock.now() + 30.0)
+        assert can_start_restock(estimated_duration=60.0) is False
+
+        clock.advance(40.0)
+        assert can_start_restock(estimated_duration=60.0) is True
+
+        register_deadline(slot_id="slot-2", deadline=clock.now() + 20.0)
+        assert can_start_restock(estimated_duration=60.0) is False
+
+        clock.advance(30.0)
+        assert can_start_restock(estimated_duration=60.0) is True
+
+        register_deadline(slot_id="slot-3", deadline=clock.now() + 100.0)
+        assert can_start_restock(estimated_duration=200.0) is False
+        assert can_start_restock(estimated_duration=10.0) is True
+
+        if callable(clear_deadline):
+            clear_deadline(slot_id="slot-3")
+        assert can_start_restock(estimated_duration=60.0) is True
     finally:
         _shutdown_queue(queue)
