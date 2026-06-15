@@ -1,9 +1,12 @@
 """Platform abstraction utilities for cross-platform compatibility."""
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -116,7 +119,13 @@ def open_steam_game(app_id: str = "359320") -> None:
 def system_shutdown(delay_seconds: int = 30) -> None:
     """Initiate system shutdown in a cross-platform manner."""
     import os
-    
+    import sys
+
+    # Safety guard: never shut down during test runs.
+    if "pytest" in sys.modules:
+        logger.warning("system_shutdown() suppressed — pytest is active.")
+        return
+
     if IS_WINDOWS:
         os.system(f"shutdown /s /t {delay_seconds}")
     elif IS_LINUX:
