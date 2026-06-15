@@ -4,22 +4,116 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast, final
+from unittest.mock import MagicMock, patch
 
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
 from TraversalSystem.config import TraversalOptions
 from TraversalSystem.gui.binding_controller import BindingSnapshot, SlotClassification
 from TraversalSystem.gui.worker_controller import JournalRuntime, SlotRuntimeRecord, WorkerController
-from TraversalSystem.gui.worker_state import FailureKind, SlotFailure, WorkerState
+from TraversalSystem.gui.worker_state import FailureKind, SlotFailure, WorkerState, WorkerStateMachine
 from TraversalSystem.gui_config import CarrierSlotConfig, GuiConfig, UniversalSettings
+from TraversalSystem.gui.workers import CarrierAutomationWorker
 from TraversalSystem.runtime.controller import StatusCallback
 from TraversalSystem.sequence_queue import CancelledBlockError, SequenceQueue
 from TraversalSystem.window_manager import WindowBinding, WindowInfo
-from typing import cast
 
 
 _ = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self._callbacks: list[Callable[..., object]] = []
+
+    def connect(self, callback: Callable[..., object]) -> None:
+        self._callbacks.append(callback)
+
+    def emit(self, *args: object) -> None:
+        for callback in list(self._callbacks):
+            try:
+                _ = callback(*args)
+            except TypeError:
+                _ = callback()
+
+
+@final
+class _FakeQThread:
+    def __init__(self, parent: object = None) -> None:
+        self.parent: object | None = parent
+        self.started: _FakeSignal = _FakeSignal()
+        self.finished: _FakeSignal = _FakeSignal()
+        self.quit_called: bool = False
+        self.start_calls: int = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def quit(self) -> None:
+        self.quit_called = True
+
+    def deleteLater(self) -> None:
+        return None
+
+
+@final
+class _FakeCarrierAutomationWorker:
+    def __init__(
+        self,
+        request: object,
+        *,
+        traversal_runner: object,
+        failure_classifier: object,
+    ) -> None:
+        self.request: object = request
+        self.traversal_runner: object = traversal_runner
+        self.failure_classifier: object = failure_classifier
+        self.runtime_status: _FakeSignal = _FakeSignal()
+        self.failure: _FakeSignal = _FakeSignal()
+        self.log: _FakeSignal = _FakeSignal()
+        self.finished: _FakeSignal = _FakeSignal()
+        self.thread: object | None = None
+
+    def moveToThread(self, thread: object) -> None:
+        self.thread = thread
+
+    def run(self) -> None:
+        return None
+
+    def deleteLater(self) -> None:
+        return None
+
+
+@final
+class _TrackingQueueDependency:
+    def __init__(self, shutdown: Callable[..., object]) -> None:
+        self.shutdown = shutdown
+
+
+@final
+class _TrackingJournalRuntime:
+    def __init__(
+        self,
+        facade: object,
+        *,
+        start: Callable[[], object],
+        stop: Callable[[], object],
+    ) -> None:
+        self._facade = facade
+        self._start = start
+        self._stop = stop
+
+    def start(self) -> None:
+        _ = self._start()
+
+    def stop(self) -> None:
+        _ = self._stop()
+
+    def facade_for(self, fid: str) -> object:
+        _ = fid
+        return self._facade
 
 
 def _wait_until(
@@ -726,6 +820,110 @@ def test_controller_shutdown_cancels_waiting_and_active_queue_workers(
     assert failures == []
     assert _queue_worker_is_alive(sequence_queue) is False
     _wait_for_controller_idle(qapp, controller, [0, 1])
+def test_sync_slots_active_refresh_preserves_running_worker_control(
+    tmp_path: Path,
+) -> None:
+    config, bindings = _config(tmp_path, 1)
+    controller = WorkerController()
+    controller.sync_slots(config, bindings)
+
+    records = cast(dict[int, SlotRuntimeRecord], getattr(controller, "_records"))
+    record = records[0]
+    record.state_machine.transition_to(WorkerState.STARTING)
+    record.state_machine.transition_to(WorkerState.RUNNING)
+
+    original_thread = cast(QThread, MagicMock(name="original-thread"))
+    original_worker = cast(CarrierAutomationWorker, MagicMock(name="original-worker"))
+    original_cancel_event = threading.Event()
+    queue_shutdown = MagicMock(name="shared-sequence-queue-shutdown")
+    journal_start = MagicMock(name="journal-runtime-start")
+    journal_stop = MagicMock(name="journal-runtime-stop")
+    shared_queue = _TrackingQueueDependency(queue_shutdown)
+    journal_runtime = _TrackingJournalRuntime(
+        MagicMock(name="journal-facade"),
+        start=journal_start,
+        stop=journal_stop,
+    )
+
+    record.thread = original_thread
+    record.worker = original_worker
+    record.cancel_event = original_cancel_event
+    setattr(controller, "_shared_sequence_queue_dependency", shared_queue)
+    setattr(controller, "_journal_runtime", journal_runtime)
+
+    controller.sync_slots(config, bindings)
+
+    refreshed = cast(dict[int, SlotRuntimeRecord], getattr(controller, "_records"))[0]
+    assert refreshed.thread is original_thread
+    assert refreshed.worker is original_worker
+    assert refreshed.cancel_event is original_cancel_event
+    assert refreshed.state_machine.state is WorkerState.RUNNING
+    queue_shutdown.assert_not_called()
+    journal_stop.assert_not_called()
+    assert getattr(controller, "_shared_sequence_queue_dependency") is shared_queue
+    assert getattr(controller, "_journal_runtime") is journal_runtime
+
+    assert controller.stop_slot(0) is True
+    assert original_cancel_event.is_set() is True
+
+
+def test_stale_finish_signal_does_not_destroy_replacement_runtime_dependencies(
+    tmp_path: Path,
+    qapp: QApplication,
+) -> None:
+    _ = qapp
+    config, bindings = _config(tmp_path, 1)
+    queue_shutdown = MagicMock(name="shared-sequence-queue-shutdown")
+    journal_start = MagicMock(name="journal-runtime-start")
+    journal_stop = MagicMock(name="journal-runtime-stop")
+    shared_queue = _TrackingQueueDependency(queue_shutdown)
+    journal_runtime = _TrackingJournalRuntime(
+        MagicMock(name="journal-facade"),
+        start=journal_start,
+        stop=journal_stop,
+    )
+
+    with patch("TraversalSystem.gui.worker_controller.QThread", _FakeQThread), patch(
+        "TraversalSystem.gui.worker_controller.CarrierAutomationWorker",
+        _FakeCarrierAutomationWorker,
+    ):
+        controller = WorkerController(
+            journal_runtime_factory=lambda _universal: cast(
+                JournalRuntime,
+                cast(object, journal_runtime),
+            ),
+            focus_dependency_factory=lambda _binding, _universal: MagicMock(name="focus"),
+            sequence_queue_dependency_factory=lambda: shared_queue,
+        )
+        controller.sync_slots(config, bindings)
+
+        assert controller.start_slot(0) is True
+
+        records = cast(dict[int, SlotRuntimeRecord], getattr(controller, "_records"))
+        active_record = records[0]
+        stale_worker = cast(_FakeCarrierAutomationWorker, cast(object, active_record.worker))
+        assert stale_worker is not None
+
+        replacement_thread = cast(QThread, MagicMock(name="replacement-thread"))
+        replacement_worker = cast(CarrierAutomationWorker, MagicMock(name="replacement-worker"))
+        replacement_cancel_event = threading.Event()
+        replacement_state_machine = WorkerStateMachine("slot-0", WorkerState.RUNNING)
+
+        active_record.thread = replacement_thread
+        active_record.worker = replacement_worker
+        active_record.cancel_event = replacement_cancel_event
+        active_record.state_machine = replacement_state_machine
+
+        stale_worker.finished.emit(True)
+
+        journal_stop.assert_not_called()
+        queue_shutdown.assert_not_called()
+        assert getattr(controller, "_journal_runtime") is journal_runtime
+        assert getattr(controller, "_shared_sequence_queue_dependency") is shared_queue
+        assert active_record.state_machine.state is WorkerState.RUNNING
+        assert active_record.thread is replacement_thread
+        assert active_record.worker is replacement_worker
+        assert active_record.cancel_event is replacement_cancel_event
 
 
 # ---------------------------------------------------------------------------
