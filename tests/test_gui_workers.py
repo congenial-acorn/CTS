@@ -1075,13 +1075,13 @@ def test_two_slots_share_router_but_isolate_fids(
 
 
 # ---------------------------------------------------------------------------
-# Regression: per-slot power_saving / single_discord_message / shutdown_on_complete
+# Regression: per-slot single_discord_message override
 # ---------------------------------------------------------------------------
 
 
 def _per_slot_config(tmp_path: Path) -> tuple[GuiConfig, dict[int, BindingSnapshot]]:
     """Build a config where slot values intentionally differ from universal
-    values for the three per-slot traversal option fields."""
+    values for single_discord_message."""
     route_file = tmp_path / "route.txt"
     _ = route_file.write_text("Sol\n", encoding="utf-8")
     slots = [
@@ -1091,10 +1091,8 @@ def _per_slot_config(tmp_path: Path) -> tuple[GuiConfig, dict[int, BindingSnapsh
             commander_name="Cmdr 0",
             route_file=str(route_file),
             state="ready",
-            # Slot 0: power_saving=True, single_discord_message=True, shutdown_on_complete=False
-            power_saving=True,
+            # Slot 0: single_discord_message=True (overrides universal False)
             single_discord_message=True,
-            shutdown_on_complete=False,
         ),
         CarrierSlotConfig(
             slot_index=1,
@@ -1102,10 +1100,8 @@ def _per_slot_config(tmp_path: Path) -> tuple[GuiConfig, dict[int, BindingSnapsh
             commander_name="Cmdr 1",
             route_file=str(route_file),
             state="ready",
-            # Slot 1: power_saving=False, single_discord_message=False, shutdown_on_complete=True
-            power_saving=False,
+            # Slot 1: single_discord_message=False (matches universal)
             single_discord_message=False,
-            shutdown_on_complete=True,
         ),
     ]
     config = GuiConfig(
@@ -1115,7 +1111,6 @@ def _per_slot_config(tmp_path: Path) -> tuple[GuiConfig, dict[int, BindingSnapsh
             multi_commander_enabled=True,
             focus_timeout_seconds=7,
             # Universal values intentionally OPPOSITE to slot values:
-            power_saving=False,
             single_discord_message=False,
             shutdown_on_complete=True,
         ),
@@ -1129,11 +1124,11 @@ def test_per_slot_options_use_slot_values_not_universal(
     tmp_path: Path,
     qapp: QApplication,
 ) -> None:
-    """_build_options() must read power_saving, single_discord_message, and
-    shutdown_on_complete from the *slot* config, NOT from universal settings.
+    """_build_options() must read single_discord_message from the *slot* config.
 
-    This test fails (RED) when those three fields are still wired to
-    ``universal.*`` instead of ``slot.*``.
+    shutdown_on_complete is now universal-only and always set to False in
+    GUI-built options (WorkerController handles shutdown when all carriers
+    complete).
     """
     _ = qapp
     config, bindings = _per_slot_config(tmp_path)
@@ -1173,27 +1168,23 @@ def test_per_slot_options_use_slot_values_not_universal(
 
     # Slot 0 expectations
     opts0 = captured_options[0]
-    assert opts0.power_saving is True, (
-        f"Slot 0 power_saving should be True (slot value), got {opts0.power_saving}"
-    )
     assert opts0.single_discord_message is True, (
         f"Slot 0 single_discord_message should be True (slot value), got {opts0.single_discord_message}"
-    )
-    assert opts0.shutdown_on_complete is False, (
-        f"Slot 0 shutdown_on_complete should be False (slot value), got {opts0.shutdown_on_complete}"
     )
 
     # Slot 1 expectations
     opts1 = captured_options[1]
-    assert opts1.power_saving is False, (
-        f"Slot 1 power_saving should be False (slot value), got {opts1.power_saving}"
-    )
     assert opts1.single_discord_message is False, (
         f"Slot 1 single_discord_message should be False (slot value), got {opts1.single_discord_message}"
     )
-    assert opts1.shutdown_on_complete is True, (
-        f"Slot 1 shutdown_on_complete should be True (slot value), got {opts1.shutdown_on_complete}"
-    )
+
+    # shutdown_on_complete is always False in GUI-built options
+    # (WorkerController handles shutdown globally when all carriers complete)
+    for opts in [opts0, opts1]:
+        assert opts.shutdown_on_complete is False, (
+            "shutdown_on_complete must be False in GUI options — "
+            "WorkerController handles it globally"
+        )
 
     # Universal values must still be used for non-slot fields
     for opts in [opts0, opts1]:

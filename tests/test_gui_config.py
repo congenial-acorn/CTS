@@ -567,18 +567,6 @@ class TestPerSlotNewFields:
         cfg = load_gui_config(p)
         assert cfg.carrier_slots[0].enabled is False
 
-    def test_per_slot_power_saving(self, tmp_path: Path):
-        data = {
-            "schema_version": 1,
-            "universal": {},
-            "carrier_slots": [
-                {"slot_index": 0, "power_saving": True, "state": "unbound"},
-            ],
-        }
-        p = _write_json(tmp_path, data)
-        cfg = load_gui_config(p)
-        assert cfg.carrier_slots[0].power_saving is True
-
     def test_per_slot_single_discord_message(self, tmp_path: Path):
         data = {
             "schema_version": 1,
@@ -591,18 +579,6 @@ class TestPerSlotNewFields:
         cfg = load_gui_config(p)
         assert cfg.carrier_slots[0].single_discord_message is True
 
-    def test_per_slot_shutdown_on_complete(self, tmp_path: Path):
-        data = {
-            "schema_version": 1,
-            "universal": {},
-            "carrier_slots": [
-                {"slot_index": 0, "shutdown_on_complete": False, "state": "unbound"},
-            ],
-        }
-        p = _write_json(tmp_path, data)
-        cfg = load_gui_config(p)
-        assert cfg.carrier_slots[0].shutdown_on_complete is False
-
     def test_per_slot_defaults_when_absent(self, tmp_path: Path):
         data = {
             "schema_version": 1,
@@ -614,9 +590,7 @@ class TestPerSlotNewFields:
         slot = cfg.carrier_slots[0]
         assert slot.display_name == ""
         assert slot.enabled is True
-        assert slot.power_saving is False
         assert slot.single_discord_message is False
-        assert slot.shutdown_on_complete is True
 
     def test_per_slot_fields_round_trip(self, tmp_path: Path):
         cfg = GuiConfig(
@@ -625,9 +599,7 @@ class TestPerSlotNewFields:
                     slot_index=0,
                     display_name="Test Slot",
                     enabled=False,
-                    power_saving=True,
                     single_discord_message=True,
-                    shutdown_on_complete=False,
                     state="unbound",
                 ),
             ],
@@ -638,9 +610,7 @@ class TestPerSlotNewFields:
         slot = cfg2.carrier_slots[0]
         assert slot.display_name == "Test Slot"
         assert slot.enabled is False
-        assert slot.power_saving is True
         assert slot.single_discord_message is True
-        assert slot.shutdown_on_complete is False
 
     def test_route_position_loaded(self, tmp_path: Path):
         data = {
@@ -661,9 +631,7 @@ class TestPerSlotNewFields:
                     slot_index=0,
                     display_name="Slot A",
                     enabled=True,
-                    power_saving=False,
                     single_discord_message=True,
-                    shutdown_on_complete=True,
                     state="unbound",
                 ),
             ],
@@ -672,9 +640,7 @@ class TestPerSlotNewFields:
         slot_d = d["carrier_slots"][0]
         assert slot_d["display_name"] == "Slot A"
         assert slot_d["enabled"] is True
-        assert slot_d["power_saving"] is False
         assert slot_d["single_discord_message"] is True
-        assert slot_d["shutdown_on_complete"] is True
 
 
 # ===================================================================

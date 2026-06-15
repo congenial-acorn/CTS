@@ -211,7 +211,6 @@ def _make_options(tmp_path: Path, *, auto_plot_jumps: bool = True) -> TraversalO
         tritium_slot=0,
         auto_plot_jumps=auto_plot_jumps,
         disable_refuel=False,
-        power_saving=False,
         refuel_mode=0,
         single_discord_message=False,
         shutdown_on_complete=False,

@@ -69,7 +69,6 @@ def _make_config_with_slot(
             ambiguous_window_policy="manual",
             single_discord_message=True,
             shutdown_on_complete=False,
-            power_saving=True,
         ),
         carrier_slots=[slot],
     )
@@ -94,7 +93,6 @@ class TestImportBasic:
         assert uni.ambiguous_window_policy == "abort"
         assert uni.single_discord_message is False
         assert uni.shutdown_on_complete is False
-        assert uni.power_saving is False
 
     def test_import_creates_one_slot(self):
         cfg = import_legacy_settings(FIXTURES / "multicarrier_enabled.ini")
@@ -269,7 +267,6 @@ class TestExportBasic:
             "route_position=",
             "auto-plot-jumps=",
             "disable-refuel=",
-            "power-saving=",
             "refuel-mode=",
             "single-discord-message=",
             "shutdown-on-complete=",
@@ -295,7 +292,6 @@ class TestExportBasic:
         assert "ambiguous-window-policy=manual" in text
         assert "single-discord-message=true" in text
         assert "shutdown-on-complete=false" in text
-        assert "power-saving=true" in text
 
     def test_export_slot_values(self, tmp_path: Path):
         cfg = _make_config_with_slot()
@@ -372,7 +368,6 @@ class TestRoundTrip:
         assert cfg2.universal.ambiguous_window_policy == cfg1.universal.ambiguous_window_policy
         assert cfg2.universal.single_discord_message == cfg1.universal.single_discord_message
         assert cfg2.universal.shutdown_on_complete == cfg1.universal.shutdown_on_complete
-        assert cfg2.universal.power_saving == cfg1.universal.power_saving
 
         # Slot
         s1, s2 = cfg1.carrier_slots[0], cfg2.carrier_slots[0]

@@ -54,7 +54,6 @@ def _make_options(**overrides: object) -> TraversalOptions:
         tritium_slot=int(overrides.get("tritium_slot", 0)),  # pyright: ignore[reportArgumentType]
         auto_plot_jumps=bool(overrides.get("auto_plot_jumps", True)),
         disable_refuel=bool(overrides.get("disable_refuel", False)),
-        power_saving=bool(overrides.get("power_saving", False)),
         refuel_mode=int(overrides.get("refuel_mode", 0)),  # pyright: ignore[reportArgumentType]
         single_discord_message=bool(overrides.get("single_discord_message", False)),
         shutdown_on_complete=bool(overrides.get("shutdown_on_complete", True)),

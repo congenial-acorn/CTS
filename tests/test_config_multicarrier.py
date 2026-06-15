@@ -31,7 +31,6 @@ class TestMulticarrierEnabled:
         opts = load_settings(FIXTURES / "multicarrier_enabled.ini")
         assert opts.auto_plot_jumps is True
         assert opts.disable_refuel is False
-        assert opts.power_saving is False
         assert opts.refuel_mode == 0
 
 
