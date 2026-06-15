@@ -15,7 +15,6 @@ from typing import Iterable, List, Protocol, Tuple, cast
 import urllib.error
 import urllib.request
 
-import psutil
 import pyautogui
 import pyperclip
 import pytz
@@ -28,9 +27,7 @@ try:
     from .reshandler import Reshandler
     from .platform_utils import (
         get_screen_resolution,
-        open_steam_game,
         system_shutdown,
-        get_game_process_names,
         IS_WINDOWS,
     )
     from . import input_handler
@@ -47,9 +44,7 @@ except ImportError:
     from reshandler import Reshandler  # type: ignore[reportMissingImports]
     from platform_utils import (  # type: ignore[reportMissingImports]
         get_screen_resolution,
-        open_steam_game,
         system_shutdown,
-        get_game_process_names,
         IS_WINDOWS,
     )
     import input_handler  # type: ignore[reportMissingImports]
@@ -601,6 +596,8 @@ def _run_coordinated_restock(
     Automation blocks (jump/restock) are serialized.
     Retries stay outside queue blocks.
     """
+    if options.disable_refuel:
+        return
     if sequence_queue is None or queue_slot_id is None:
         restock_tritium(
             options,
@@ -659,75 +656,7 @@ def handle_critical_error(
         "o7",
     )
     save_progress(state)
-    os._exit(2)
-
-
-def open_game(
-    state: TraversalState,
-    options: TraversalOptions,
-    res_handler: Reshandler,
-    journal_dep: object,
-    discord_messenger: DiscordHandler,
-    route_name: str,
-    focus_handler: InputHandlerAdapter | None = None,
-    cancel_event: threading.Event | None = None,
-) -> None:
-    handler = _resolve_input_handler(focus_handler)
-    try:
-        if cancel_event is not None and cancel_event.is_set():
-            return
-
-        print("Re-opening game...")
-
-        open_steam_game("359320")
-        _wait_for_duration(60, cancel_event=cancel_event, randomize=False)
-
-        journal_path = _find_newest_journal(options.journal_directory)
-
-        menu_loaded = False
-        while not menu_loaded:
-            if cancel_event is not None and cancel_event.is_set():
-                return
-            content = journal_path.read_text(encoding="utf-8")
-            if "Fileheader" in content:
-                print("Menu loaded")
-                menu_loaded = True
-            else:
-                print("Menu not loaded...")
-                _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
-
-        _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
-
-        print("Starting game...")
-        handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
-        handler.click()
-        follow_button_sequence(
-            SEQUENCE_DIR,
-            "start_game.txt",
-            focus_handler=handler,
-            cancel_event=cancel_event,
-        )
-
-        loaded = False
-        while not loaded:
-            if cancel_event is not None and cancel_event.is_set():
-                return
-            content = journal_path.read_text(encoding="utf-8")
-            if "Location" in content:
-                print("Game loaded")
-                loaded = True
-            else:
-                print("Game not loaded...")
-                handler.press("space")
-                _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
-
-        print("Switching to new journal...")
-        facade = cast(CTSJournalFacade, journal_dep)
-        facade.reset_jump()
-        state.stop_journal.clear()
-        state.game_ready = True
-    except TraversalStopped:
-        return
+    raise RuntimeError("Critical error stopped carrier slot.")
 
 
 def run_traversal(
@@ -932,36 +861,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 print(
                     f"Navigation complete. Jump occurs in {formatted_time}. Counting down..."
                 )
-                if options.power_saving:
-                    print("Power saving mode is active. Closing game...")
-                    state.stop_journal.set()
-                    follow_button_sequence(
-                        SEQUENCE_DIR,
-                        "close_game.txt",
-                        focus_handler=focus_dependency,
-                        runtime_context=runtime_context,
-                    )
-                    threading.Timer(
-                        time_to_jump,
-                        open_game,
-                        args=(
-                            state,
-                            options,
-                            res_handler,
-                            journal,
-                            discord_messenger,
-                            route_name,
-                            focus_dependency,
-                            runtime_context.cancel_event,
-                        ),
-                    ).start()
-                    state.game_ready = False
-                    print("Game open scheduled")
-                    game_process_names = get_game_process_names()
-                    for proc in psutil.process_iter():
-                        if proc.name() in game_process_names:
-                            proc.kill()
-                    print("Launcher killed")
 
                 journal.reset_jump()
 
@@ -989,7 +888,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         f"Estimated time of route completion: {arrival_time_discord}",
                         "o7",
                     )
-                    time.sleep(2)
+                    _wait_for_duration(2, runtime_context=runtime_context, randomize=False)
                     discord_messenger.update_fields(0, 0)
                 else:
                     if not state.saved_resume:
@@ -1004,7 +903,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             f"Estimated time of route completion: {arrival_time_discord}",
                             "o7",
                         )
-                        time.sleep(2)
+                        _wait_for_duration(2, runtime_context=runtime_context, randomize=False)
                         discord_messenger.update_fields(0, 0)
                     else:
                         discord_messenger.post_with_fields(
@@ -1016,7 +915,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             f"Estimated time of route completion: {arrival_time_discord}",
                             "o7",
                         )
-                        time.sleep(2)
+                        _wait_for_duration(2, runtime_context=runtime_context, randomize=False)
                         discord_messenger.update_fields(0, 0)
 
             except Exception as exc:
@@ -1068,89 +967,64 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
             state.line_no += 1
 
-            if system == final_line and options.power_saving:
-                print("Counting down until jump finishes...")
+            print("Counting down until next jump...")
+            total_time = 362
+            cooldown_deadline = time.monotonic() + 362.0
+            if idx + 1 < len(route_list):
+                register_next_jump_deadline(total_time)
+            while total_time > 0:
+                runtime_context.transition("waiting")
+                print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
-                total_time = 60
-                while total_time > 0:
-                    runtime_context.transition("waiting")
-                    print(total_time)
-                    runtime_context.raise_if_cancelled()
-                    if journal.jump_cancelled():
-                        return _handle_jump_cancelled(system, revert_index=True)
-                    runtime_context.wait(1)
-                    total_time -= 1
+                match total_time:
+                    case 340:
+                        discord_messenger.update_fields(6, 7)
+                    case 320:
+                        discord_messenger.update_fields(7, 7)
+                    case 300:
+                        print("\nPausing execution until jump is confirmed...")
+                        completed = False
+                        while not completed:
+                            runtime_context.transition("waiting")
+                            runtime_context.raise_if_cancelled()
+                            if journal.jump_cancelled():
+                                return _handle_jump_cancelled(system, revert_index=True)
+                            completed = journal.has_jumped()
+                            if not completed:
+                                print("Jump not complete...")
+                                runtime_context.wait(10)
+                        assert cooldown_deadline is not None
+                        total_time = max(0, int(cooldown_deadline - time.monotonic()))
+                        print("Jump complete!")
+                        runtime_context.transition("running")
+                        discord_messenger.update_fields(8, 7)
+                        print("Submitting tritium restock to shared queue...")
+                        clear_registered_jump_deadline()
+                        restock_started_at = time.monotonic()
+                        _run_coordinated_restock(
+                            sequence_queue=sequence_queue,
+                            queue_slot_id=queue_slot_id,
+                            cancel_event=runtime_context.cancel_event,
+                            runtime_context=runtime_context,
+                            options=options,
+                            sequence_dir=SEQUENCE_DIR,
+                            focus_handler=focus_dependency,
+                        )
+                        restock_elapsed = time.monotonic() - restock_started_at
+                        total_time = max(0, total_time - int(restock_elapsed))
+                        if idx + 1 < len(route_list) and total_time > 0:
+                            register_next_jump_deadline(total_time)
+                    case 151:
+                        discord_messenger.update_fields(8, 8)
+                    case 100:
+                        discord_messenger.update_fields(8, 9)
 
-                discord_messenger.update_fields(9, 9)
-            else:
-                print("Counting down until next jump...")
-                total_time = 362
-                cooldown_deadline = time.monotonic() + 362.0
-                if idx + 1 < len(route_list):
-                    register_next_jump_deadline(total_time)
-                while total_time > 0:
-                    runtime_context.transition("waiting")
-                    print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
-
-                    match total_time:
-                        case 340:
-                            discord_messenger.update_fields(6, 7)
-                        case 320:
-                            discord_messenger.update_fields(7, 7)
-                        case 300:
-                            if not options.power_saving:
-                                print("\nPausing execution until jump is confirmed...")
-                                completed = False
-                                while not completed:
-                                    runtime_context.transition("waiting")
-                                    runtime_context.raise_if_cancelled()
-                                    if journal.jump_cancelled():
-                                        return _handle_jump_cancelled(system, revert_index=True)
-                                    completed = journal.has_jumped()
-                                    if not completed:
-                                        print("Jump not complete...")
-                                        runtime_context.wait(10)
-                            else:
-                                print("\nPausing execution until game is open and ready...")
-                                while not state.game_ready:
-                                    runtime_context.transition("waiting")
-                                    runtime_context.raise_if_cancelled()
-                                    if journal.jump_cancelled():
-                                        return _handle_jump_cancelled(system, revert_index=True)
-                                    print("Game not ready...")
-                                    runtime_context.wait(10)
-                                assert cooldown_deadline is not None
-                                total_time = max(0, int(cooldown_deadline - time.monotonic()))
-                            print("Jump complete!")
-                            runtime_context.transition("running")
-                            discord_messenger.update_fields(8, 7)
-                            print("Submitting tritium restock to shared queue...")
-                            clear_registered_jump_deadline()
-                            restock_started_at = time.monotonic()
-                            _run_coordinated_restock(
-                                sequence_queue=sequence_queue,
-                                queue_slot_id=queue_slot_id,
-                                cancel_event=runtime_context.cancel_event,
-                                runtime_context=runtime_context,
-                                options=options,
-                                sequence_dir=SEQUENCE_DIR,
-                                focus_handler=focus_dependency,
-                            )
-                            restock_elapsed = time.monotonic() - restock_started_at
-                            total_time = max(0, total_time - int(restock_elapsed))
-                            if idx + 1 < len(route_list) and total_time > 0:
-                                register_next_jump_deadline(total_time)
-                        case 151:
-                            discord_messenger.update_fields(8, 8)
-                        case 100:
-                            discord_messenger.update_fields(8, 9)
-
-                    runtime_context.wait(1)
-                    total_time -= 1
-                print()
-                clear_registered_jump_deadline()
-                runtime_context.transition("running")
-                discord_messenger.update_fields(9, 9)
+                runtime_context.wait(1)
+                total_time -= 1
+            print()
+            clear_registered_jump_deadline()
+            runtime_context.transition("running")
+            discord_messenger.update_fields(9, 9)
 
             done_first = True
 
@@ -1165,14 +1039,14 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         )
         if options.shutdown_on_complete:
             discord_messenger.post_to_discord(
-            "Carrier Arrived",
-            options.webhook_url,
-            route_name,
-            f"Shutting down computer.",
-            "o7",
-        )
+                "Carrier Arrived",
+                options.webhook_url,
+                route_name,
+                "Shutting down computer.",
+                "o7",
+            )
             print("Shutting down system in 30 seconds...")
-            time.sleep(5)
+            _wait_for_duration(5, runtime_context=runtime_context, randomize=False)
             system_shutdown(30)
         else:
             print("Shutdown on completion is disabled. Exiting without powering off.")
