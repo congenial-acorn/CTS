@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+import threading
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -35,12 +36,13 @@ MSL = [
 ]
 
 class DiscordHandler:
-    __slots__ = ["lastHook", "lastEmbed", "photo_list", "single_message"]
+    __slots__ = ["lastHook", "lastEmbed", "photo_list", "single_message", "_lock"]
 
     def __init__(self, *, single_message: bool = False, photos: Optional[Iterable[str]] = None) -> None:
         self.lastHook = None
         self.lastEmbed = None
         self.single_message = single_message
+        self._lock = threading.Lock()
 
         if photos is not None:
             self.photo_list: List[str] = list(photos)
@@ -59,68 +61,71 @@ class DiscordHandler:
         """Send a simple message to a Discord webhook."""
         if webhook_url == "":
             return
-        try:
-            photo = random.choice(self.photo_list)
-            self._prepare_hook(webhook_url, subject, routeName, message, photo)
-            self._send_or_edit()
-        except Exception as e:
-            print("Discord webhook failed with error: ", e)
-            print("Double-check that the webhook is set up")
+        with self._lock:
+            try:
+                photo = random.choice(self.photo_list)
+                self._prepare_hook(webhook_url, subject, routeName, message, photo)
+                self._send_or_edit()
+            except Exception as e:
+                print("Discord webhook failed with error: ", e)
+                print("Double-check that the webhook is set up")
 
 
     def post_with_fields(self, subject: str, webhook_url: str, routeName: str, *message: str):
         """Send a message to a Discord webhook with status fields attached."""
         if webhook_url == "":
             return
-        try:
-            photo = random.choice(self.photo_list)
-            self._prepare_hook(webhook_url, subject, routeName, message, photo)
-            self._reset_fields()
-            self._add_fields(("Jump stage", "Wait..."), ("Maintenance stage", "Wait..."))
-            self._send_or_edit()
-        except Exception as e:
-            print("Discord webhook failed with error: ", e)
-            print("Double-check that the webhook is set up")
+        with self._lock:
+            try:
+                photo = random.choice(self.photo_list)
+                self._prepare_hook(webhook_url, subject, routeName, message, photo)
+                self._reset_fields()
+                self._add_fields(("Jump stage", "Wait..."), ("Maintenance stage", "Wait..."))
+                self._send_or_edit()
+            except Exception as e:
+                print("Discord webhook failed with error: ", e)
+                print("Double-check that the webhook is set up")
 
 
     def update_fields(self, carrierStage: int, maintenanceStage: int):
         if not self.lastHook:
             return
-        try:
-            cur_CSL, cur_MSL = [], []  # Define carrier stage list and maintenance stage list for the current field update
+        with self._lock:
+            try:
+                cur_CSL, cur_MSL = [], []  # Define carrier stage list and maintenance stage list for the current field update
 
-            # Add strikethru to every carrier stage before current
-            for c_stage_name in CSL[:carrierStage]:
-                cur_CSL.append(f"~~{c_stage_name}~~")
-            # Bold current stage
-            cur_CSL.append(f"**{CSL[carrierStage]}**")
-            # Add remaining stages as normal text
-            cur_CSL += CSL[carrierStage+1:]
+                # Add strikethru to every carrier stage before current
+                for c_stage_name in CSL[:carrierStage]:
+                    cur_CSL.append(f"~~{c_stage_name}~~")
+                # Bold current stage
+                cur_CSL.append(f"**{CSL[carrierStage]}**")
+                # Add remaining stages as normal text
+                cur_CSL += CSL[carrierStage+1:]
+                
+                # Add strikethru & "...DONE" signifier to every maintenance stage before current
+                for m_stage_name in MSL[:maintenanceStage]:
+                    cur_MSL.append(f"~~{m_stage_name}...DONE~~")
+                # Bold current stage and add ellipsis
+                cur_MSL.append(f"**{MSL[maintenanceStage]}...**")
+                # Add remaining stages as normal text
+                cur_MSL += MSL[maintenanceStage+1:]
+
+                # Once the jump is finished, replace all countdowns with a static text blurb
+                if maintenanceStage == 9 and self.lastEmbed.description:
+                    while re.search(r"<t:\d*:R>", self.lastEmbed.description):
+                        self.lastEmbed.description = str(re.sub(r"<t:\d*:R>", "Countdown Expired", self.lastEmbed.description))
             
-            # Add strikethru & "...DONE" signifier to every maintenance stage before current
-            for m_stage_name in MSL[:maintenanceStage]:
-                cur_MSL.append(f"~~{m_stage_name}...DONE~~")
-            # Bold current stage and add ellipsis
-            cur_MSL.append(f"**{MSL[maintenanceStage]}...**")
-            # Add remaining stages as normal text
-            cur_MSL += MSL[maintenanceStage+1:]
-
-            # Once the jump is finished, replace all countdowns with a static text blurb
-            if maintenanceStage == 9 and self.lastEmbed.description:
-                while re.search(r"<t:\d*:R>", self.lastEmbed.description):
-                    self.lastEmbed.description = str(re.sub(r"<t:\d*:R>", "Countdown Expired", self.lastEmbed.description))
-        
-        
-            self._reset_fields()
-            self._add_fields(
-                ("Jump stage", "\n".join(cur_CSL)),
-                ("Maintenance stage", "\n".join(cur_MSL)),
-            )
-            self.lastHook.edit()
-        except Exception as e:
-            print("Discord webhook failed with error: ", e)
-            print("Double-check that the webhook is set up")
-            # print(f"DEBUG DATA: lastHook: {self.lastHook}, lastEmbed: {self.lastEmbed}")
+            
+                self._reset_fields()
+                self._add_fields(
+                    ("Jump stage", "\n".join(cur_CSL)),
+                    ("Maintenance stage", "\n".join(cur_MSL)),
+                )
+                self.lastHook.edit()
+            except Exception as e:
+                print("Discord webhook failed with error: ", e)
+                print("Double-check that the webhook is set up")
+                # print(f"DEBUG DATA: lastHook: {self.lastHook}, lastEmbed: {self.lastEmbed}")
 
     def _prepare_hook(
         self,
