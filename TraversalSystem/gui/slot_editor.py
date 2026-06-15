@@ -53,14 +53,8 @@ class SlotEditorWidget(QWidget):
         self.disable_refuel_check = QCheckBox("Disable Refuel")
         self.form_layout.addRow("", self.disable_refuel_check)
         
-        self.power_saving_check = QCheckBox("Power Saving")
-        self.form_layout.addRow("", self.power_saving_check)
-        
         self.single_discord_check = QCheckBox("Single Discord Message")
         self.form_layout.addRow("", self.single_discord_check)
-        
-        self.shutdown_check = QCheckBox("Shutdown on Complete")
-        self.form_layout.addRow("", self.shutdown_check)
 
         # Scheduled Jump group
         scheduled_group = QGroupBox("Scheduled Jump")
@@ -117,9 +111,7 @@ class SlotEditorWidget(QWidget):
         self.enabled_check.setChecked(slot.enabled)
         self.auto_plot_check.setChecked(slot.auto_plot_jumps)
         self.disable_refuel_check.setChecked(slot.disable_refuel)
-        self.power_saving_check.setChecked(slot.power_saving)
         self.single_discord_check.setChecked(slot.single_discord_message)
-        self.shutdown_check.setChecked(slot.shutdown_on_complete)
         
         if slot.scheduled_jump_time:
             t = QTime.fromString(slot.scheduled_jump_time, "HH:mm:ss")
@@ -142,9 +134,7 @@ class SlotEditorWidget(QWidget):
         self.enabled_check.setChecked(True)
         self.auto_plot_check.setChecked(True)
         self.disable_refuel_check.setChecked(False)
-        self.power_saving_check.setChecked(False)
         self.single_discord_check.setChecked(False)
-        self.shutdown_check.setChecked(True)
         self.scheduled_jump_time_input.setTime(QTime(0, 0, 0))
         self.scheduled_jump_x_spin.setValue(0)
         self.scheduled_jump_y_spin.setValue(0)
@@ -176,9 +166,7 @@ class SlotEditorWidget(QWidget):
         self._current_slot.enabled = self.enabled_check.isChecked()
         self._current_slot.auto_plot_jumps = self.auto_plot_check.isChecked()
         self._current_slot.disable_refuel = self.disable_refuel_check.isChecked()
-        self._current_slot.power_saving = self.power_saving_check.isChecked()
         self._current_slot.single_discord_message = self.single_discord_check.isChecked()
-        self._current_slot.shutdown_on_complete = self.shutdown_check.isChecked()
         
         self._current_slot.scheduled_jump_time = self.scheduled_jump_time_input.time().toString("HH:mm:ss")
         self._current_slot.scheduled_jump_button_x = self.scheduled_jump_x_spin.value()

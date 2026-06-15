@@ -59,9 +59,6 @@ class UniversalSettingsWidget(QWidget):
         self.shutdown_check = QCheckBox("Shutdown on Complete")
         form_layout.addRow("", self.shutdown_check)
         
-        self.power_saving_check = QCheckBox("Power Saving Mode")
-        form_layout.addRow("", self.power_saving_check)
-        
         main_layout.addWidget(group_box)
         main_layout.addStretch()
         
@@ -79,7 +76,6 @@ class UniversalSettingsWidget(QWidget):
         self.auto_detect_check.setChecked(uni.auto_detect_window)
         self.single_discord_check.setChecked(uni.single_discord_message)
         self.shutdown_check.setChecked(uni.shutdown_on_complete)
-        self.power_saving_check.setChecked(uni.power_saving)
 
     def _connect_signals(self) -> None:
         self.journal_dir_btn.clicked.connect(self._browse_journal_dir)
@@ -92,7 +88,6 @@ class UniversalSettingsWidget(QWidget):
         self.auto_detect_check.toggled.connect(self._on_change)
         self.single_discord_check.toggled.connect(self._on_change)
         self.shutdown_check.toggled.connect(self._on_change)
-        self.power_saving_check.toggled.connect(self._on_change)
 
     def _browse_journal_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select Journal Directory", self.journal_dir_input.text())
@@ -114,5 +109,4 @@ class UniversalSettingsWidget(QWidget):
         uni.auto_detect_window = self.auto_detect_check.isChecked()
         uni.single_discord_message = self.single_discord_check.isChecked()
         uni.shutdown_on_complete = self.shutdown_check.isChecked()
-        uni.power_saving = self.power_saving_check.isChecked()
         self.settings_changed.emit()
