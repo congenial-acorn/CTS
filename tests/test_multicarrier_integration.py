@@ -4,7 +4,6 @@ selected-commander access in main.py (Task 4).
 Covers:
 - Startup readiness waits for commander discovery, NOT for CarrierJumpRequest
 - Scan loop updates selected-commander state when new journal events appear
-- Power-saving reopen reuses target_fid state after a new journal file appears
 - JournalScanLoop start/stop lifecycle
 """
 from __future__ import annotations
@@ -259,81 +258,6 @@ class TestScanLoopUpdatesSelectedCommanderState:
             scan_loop.stop()
 
 
-# ---------------------------------------------------------------------------
-# test_power_saving_reopen_reuses_target_fid_after_new_journal_appears
-# ---------------------------------------------------------------------------
-
-class TestPowerSavingReopenReusesTargetFid:
-    """When a new journal file appears (simulating power-saving reopen),
-    the router should continue tracking the same target FID's state
-    through the new file.
-    """
-
-    def test_power_saving_reopen_reuses_target_fid_after_new_journal_appears(
-        self, tmp_path: Path,
-    ) -> None:
-        # Initial journal file with the target commander.
-        journal1 = tmp_path / "Journal.2026-04-25T120000.01.log"
-        _write_lines(journal1, [
-            _evt("Fileheader", gameversion="4.0"),
-            _evt("Commander", FID="F-REOPEN", Name="ReopenCmdr"),
-            _evt(
-                "CarrierJumpRequest",
-                SystemName="Sol",
-                DepartureTime="2026-04-25T12:15:00Z",
-            ),
-        ])
-
-        router = MultiJournalRouter()
-        facade = CTSJournalFacade(router, "F-REOPEN")
-        scan_loop = JournalScanLoop(router, tmp_path)
-
-        # Simulate: scan loop was running, now stopped (power-saving close).
-        scan_loop.start()
-        time.sleep(1.5)
-        scan_loop.stop()
-
-        # Verify initial state.
-        assert facade.last_carrier_request() == "Sol"
-
-        # Simulate game reopen: a NEW journal file appears.
-        journal2 = tmp_path / "Journal.2026-04-25T130000.01.log"
-        _write_lines(journal2, [
-            _evt("Fileheader", gameversion="4.0"),
-            _evt("LoadGame", FID="F-REOPEN", Commander="ReopenCmdr"),
-        ])
-
-        # Restart scan loop (open_game does scan_loop.start()).
-        scan_loop.start()
-        try:
-            time.sleep(1.5)
-
-            # The commander should still be tracked.
-            state = facade.state()
-            assert state is not None
-            assert state.commander_name == "ReopenCmdr"
-
-            # Write a new carrier request in the new file.
-            _write_lines(journal2, [
-                _evt(
-                    "CarrierJumpRequest",
-                    SystemName="Deciat",
-                    DepartureTime="2026-04-25T13:20:00Z",
-                ),
-            ])
-
-            deadline = time.monotonic() + 5
-            while facade.last_carrier_request() != "Deciat":
-                if time.monotonic() > deadline:
-                    break
-                time.sleep(0.2)
-
-            assert facade.last_carrier_request() == "Deciat"
-            assert facade.departure_time() == "2026-04-25T13:20:00Z"
-        finally:
-            scan_loop.stop()
-
-
 class TestLostWindowInvalidatesBinding:
     def test_lost_window_invalidates_binding_and_blocks_automation(
         self, tmp_path: Path,
@@ -441,66 +365,10 @@ def test_scan_loop_updates_selected_commander_state(tmp_path: Path) -> None:
     TestScanLoopUpdatesSelectedCommanderState().test_scan_loop_updates_selected_commander_state(tmp_path)
 
 
-def test_power_saving_reopen_reuses_target_fid_after_new_journal_appears(
-    tmp_path: Path,
-) -> None:
-    TestPowerSavingReopenReusesTargetFid().test_power_saving_reopen_reuses_target_fid_after_new_journal_appears(tmp_path)
-
-
 def test_lost_window_invalidates_binding_and_blocks_automation(
     tmp_path: Path,
 ) -> None:
     TestLostWindowInvalidatesBinding().test_lost_window_invalidates_binding_and_blocks_automation(tmp_path)
-
-
-class TestPowerSavingCooldownTiming:
-    def test_power_saving_reopen_210s_leaves_expected_remaining_cooldown(
-        self, tmp_path: Path,
-    ) -> None:
-        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
-            tmp_path,
-            game_ready_after=210.0,
-        )
-
-        assert result is False
-        assert registered_remaining[0] == pytest.approx(362.0)
-        assert registered_remaining[-1] == pytest.approx(152.0, abs=2.0)
-
-    def test_power_saving_reopen_250s_uses_elapsed_time_not_hardcoded_152(
-        self, tmp_path: Path,
-    ) -> None:
-        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
-            tmp_path,
-            game_ready_after=250.0,
-        )
-
-        assert result is False
-        assert registered_remaining[0] == pytest.approx(362.0)
-        assert registered_remaining[-1] == pytest.approx(112.0, abs=2.0)
-
-    def test_power_saving_reopen_past_full_cooldown_clamps_remaining_to_zero(
-        self, tmp_path: Path,
-    ) -> None:
-        registered_remaining, _saved_indices, result = _run_power_saving_cooldown_cycle(
-            tmp_path,
-            game_ready_after=400.0,
-        )
-
-        assert result is False
-        assert registered_remaining[0] == pytest.approx(362.0)
-        assert registered_remaining == [pytest.approx(362.0)]
-
-    def test_power_saving_wait_still_honors_jump_cancellation(
-        self, tmp_path: Path,
-    ) -> None:
-        _registered_remaining, saved_indices, result = _run_power_saving_cooldown_cycle(
-            tmp_path,
-            game_ready_after=None,
-            cancel_after=150.0,
-        )
-
-        assert result is False
-        assert saved_indices == [0]
 
 
 class TestSequenceCancellationAwareWaits:
@@ -771,12 +639,21 @@ def _make_runtime_context(
     slot_id: int,
     sleep: Callable[[float], None],
     cancel_event: threading.Event | None = None,
+    clock: _ManualClock | None = None,
 ) -> TraversalRuntimeContext:
     cancel = cancel_event or threading.Event()
     # Make Event.wait() non-blocking so runtime_context.wait(N) doesn't
     # burn N real seconds per call via threading.Event.wait(step).
     _real_event_wait = cancel.wait
-    cancel.wait = lambda timeout=None: _real_event_wait(0)  # type: ignore[assignment]
+    if clock is not None:
+        # Advance the fake clock by the wait duration so time.monotonic()
+        # reflects simulated time passage.
+        cancel.wait = lambda timeout=None: (  # type: ignore[assignment]
+            clock.advance(timeout or 0),
+            _real_event_wait(0),
+        )[1]
+    else:
+        cancel.wait = lambda timeout=None: _real_event_wait(0)  # type: ignore[assignment]
     return TraversalRuntimeContext(
         options=options,
         dependencies=TraversalRuntimeDependencies(
@@ -801,134 +678,10 @@ def _make_options(tmp_path: Path) -> TraversalOptions:
         tritium_slot=0,
         auto_plot_jumps=True,
         disable_refuel=False,
-        power_saving=False,
         refuel_mode=0,
         single_discord_message=False,
         shutdown_on_complete=False,
     )
-
-
-def _run_power_saving_cooldown_cycle(
-    tmp_path: Path,
-    *,
-    game_ready_after: float | None,
-    cancel_after: float | None = None,
-) -> tuple[list[float], list[int], bool]:
-    main = _load_main_with_mocks(tmp_path)
-    clock = _ManualClock()
-    registered_remaining: list[float] = []
-    saved_indices: list[int] = []
-    scheduled_state: list[object | None] = [None]
-    cooldown_started_at: list[float | None] = [None]
-
-    class _RecordingSequenceQueue(_FakeSequenceQueue):
-        def register_jump_deadline(self, *, slot_id: str, deadline: float) -> None:
-            super().register_jump_deadline(slot_id=slot_id, deadline=deadline)
-            if cooldown_started_at[0] is None:
-                cooldown_started_at[0] = clock.now()
-            registered_remaining.append(deadline - clock.now())
-
-    class _FakeTimer:
-        def __init__(self, _delay: float, _fn: object, args: tuple[object, ...] = ()) -> None:
-            scheduled_state[0] = args[0] if args else None
-
-        def start(self) -> None:
-            return None
-
-    queue = _RecordingSequenceQueue()
-    journal = MagicMock(spec=CTSJournalFacade)
-    journal.has_jumped.return_value = False
-    journal.reset_jump.return_value = None
-    journal.reset_cancel.return_value = None
-    journal.jump_cancelled.side_effect = (
-        lambda: cancel_after is not None and clock.now() >= cancel_after
-    )
-
-    options = _make_options(tmp_path)
-    options.power_saving = True
-
-    context = _make_runtime_context(
-        options=options,
-        sequence_queue=queue,
-        journal=journal,
-        slot_id=0,
-        sleep=lambda _seconds: None,
-    )
-    context.cancel_event.wait = lambda timeout=None: _advance_power_saving_clock(
-        clock,
-        0.0 if timeout is None else timeout,
-        scheduled_state=scheduled_state,
-        cooldown_started_at=cooldown_started_at,
-        game_ready_after=game_ready_after,
-    )  # type: ignore[assignment]
-
-    jump_calls = 0
-
-    def fake_jump(*_args: object, **_kwargs: object) -> tuple[int, datetime.datetime]:
-        nonlocal jump_calls
-        jump_calls += 1
-        if jump_calls > 1:
-            raise KeyboardInterrupt
-        return 10, datetime.datetime.now(datetime.timezone.utc)
-
-    def track_save(state: object, **_kwargs: object) -> None:
-        saved_indices.append(getattr(state, "line_no"))
-
-    with patch("builtins.print"), \
-         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
-         patch.object(main, "Reshandler", _FakeResHandler), \
-         patch.object(main, "load_route_list", return_value=["A", "B"]), \
-         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
-         patch.object(main, "consume_save", return_value=None), \
-         patch.object(main, "save_progress", side_effect=track_save), \
-         patch.object(main, "jump_to_system", side_effect=fake_jump), \
-         patch.object(main, "restock_tritium"), \
-         patch.object(main, "follow_button_sequence"), \
-         patch.object(main, "get_game_process_names", return_value=[]), \
-         patch.object(main.psutil, "process_iter", return_value=[], create=True), \
-         patch.object(main.threading, "Timer", _FakeTimer), \
-         patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
-         patch.object(main, "time") as fake_time:
-        fake_time.monotonic.side_effect = clock.now
-        fake_time.sleep.side_effect = lambda _s: None
-        try:
-            result = main._run_traversal_slot(context)
-        except (KeyboardInterrupt, SystemExit):
-            result = False
-
-    return registered_remaining, saved_indices, result
-
-
-def _advance_power_saving_clock(
-    clock: _ManualClock,
-    seconds: float,
-    *,
-    scheduled_state: list[object | None],
-    cooldown_started_at: list[float | None],
-    game_ready_after: float | None,
-) -> bool:
-    current = clock.now()
-    ready_at = (
-        None
-        if game_ready_after is None or cooldown_started_at[0] is None
-        else cooldown_started_at[0] + game_ready_after
-    )
-    advance_by = seconds
-    if (
-        ready_at is not None
-        and scheduled_state[0] is not None
-        and not getattr(scheduled_state[0], "game_ready", False)
-        and current < ready_at <= current + seconds
-    ):
-        advance_by = ready_at - current
-    clock.advance(advance_by)
-    if (
-        ready_at is not None
-        and scheduled_state[0] is not None
-        and clock.now() >= ready_at
-    ):
-        setattr(scheduled_state[0], "game_ready", True)
-    return False
 
 
 def _run_restock_cycle(
@@ -939,6 +692,7 @@ def _run_restock_cycle(
 ) -> tuple[_FakeSequenceQueue, list[str]]:
     main = _load_main_with_mocks(tmp_path)
     order: list[str] = []
+    clock = _ManualClock(start=1000.0)
     queue = _FakeSequenceQueue(
         restock_failure=restock_failure,
         before_result=lambda: order.append("queue-result"),
@@ -962,7 +716,8 @@ def _run_restock_cycle(
         sequence_queue=queue,
         journal=journal,
         slot_id=0,
-        sleep=lambda _seconds: None,
+        sleep=clock.advance,
+        clock=clock,
     )
 
     def record_restock(*_args: object, **_kwargs: object) -> None:
@@ -982,7 +737,7 @@ def _run_restock_cycle(
          patch.object(main, "restock_tritium", side_effect=record_restock), \
          patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
          patch.object(main, "time") as fake_time:
-        fake_time.monotonic.side_effect = monotonic_side_effect or time.monotonic
+        fake_time.monotonic.side_effect = monotonic_side_effect or clock.now
         fake_time.sleep.side_effect = fast_sleep
         if restock_failure is None:
             assert main._run_traversal_slot(context) is False
@@ -1031,6 +786,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
     ) -> _FakeSequenceQueue:
         queue = _FakeSequenceQueue()
         created_queues.append(queue)
+        clock = _ManualClock(start=1000.0)
         journal = MagicMock()
         journal.has_jumped.return_value = True
         journal.jump_cancelled.return_value = False
@@ -1049,6 +805,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
             slot_id=0,
             sleep=sleep_side_effect,
             cancel_event=cancel_event,
+            clock=clock,
         )
 
         with patch("builtins.print"), \
@@ -1062,7 +819,7 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
              patch.object(main, "restock_tritium"), \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = sleep_side_effect
             try:
                 assert isinstance(main._run_traversal_slot(context), bool)
@@ -2209,7 +1966,6 @@ def test_multicommander_traversal_does_not_start_legacy_journal_thread(
         tritium_slot=0,
         auto_plot_jumps=True,
         disable_refuel=False,
-        power_saving=False,
         refuel_mode=0,
         single_discord_message=False,
         shutdown_on_complete=False,
@@ -2217,6 +1973,7 @@ def test_multicommander_traversal_does_not_start_legacy_journal_thread(
         target_fid="F-MC-REGRESS",
     )
 
+    clock = _ManualClock(start=1000.0)
     cancel = threading.Event()
     context = _make_runtime_context(
         options=options,
@@ -2225,6 +1982,7 @@ def test_multicommander_traversal_does_not_start_legacy_journal_thread(
         slot_id=0,
         sleep=lambda _s: None,
         cancel_event=cancel,
+        clock=clock,
     )
 
     jump_calls = 0
@@ -2251,7 +2009,7 @@ def test_multicommander_traversal_does_not_start_legacy_journal_thread(
          patch.object(main, "restock_tritium"), \
          patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
          patch.object(main, "time") as fake_time:
-        fake_time.monotonic.side_effect = time.monotonic
+        fake_time.monotonic.side_effect = clock.now
         fake_time.sleep.side_effect = lambda _s: None
         try:
             _ = main._run_traversal_slot(context)
@@ -2469,14 +2227,15 @@ class TestJumpCancellationHandling:
         def track_save(state: object, **_kw: object) -> None:
             saved_indices.append(getattr(state, "line_no"))
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
-
         with patch("builtins.print"), \
              patch.object(main, "DiscordHandler", return_value=MagicMock()), \
              patch.object(main, "Reshandler", _FakeResHandler), \
@@ -2488,7 +2247,7 @@ class TestJumpCancellationHandling:
              patch.object(main, "restock_tritium") as mock_restock, \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             result = main._run_traversal_slot(context)
 
@@ -2515,14 +2274,15 @@ class TestJumpCancellationHandling:
         def track_save(state: object, **_kw: object) -> None:
             saved_indices.append(getattr(state, "line_no"))
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
-
         with patch("builtins.print"), \
              patch.object(main, "DiscordHandler", return_value=MagicMock()), \
              patch.object(main, "Reshandler", _FakeResHandler), \
@@ -2556,12 +2316,14 @@ class TestJumpCancellationHandling:
         # Let countdown pass (4 iterations), then cancel in has_jumped loop
         journal.jump_cancelled.side_effect = [False] * 4 + [False, True]
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
 
         with patch("builtins.print"), \
@@ -2599,12 +2361,14 @@ class TestJumpCancellationHandling:
         journal.has_jumped.return_value = False
         journal.jump_cancelled.side_effect = [True]
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
 
         with patch("builtins.print"), \
@@ -2618,7 +2382,7 @@ class TestJumpCancellationHandling:
              patch.object(main, "restock_tritium"), \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             result = main._run_traversal_slot(context)
 
@@ -2689,12 +2453,14 @@ class TestCountdownHardening:
             # Before fix total_time = -3; in both cases countdown loop is skipped.
             return 3, jump_time
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
 
         with patch("builtins.print"), \
@@ -2708,7 +2474,7 @@ class TestCountdownHardening:
              patch.object(main, "restock_tritium"), \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             try:
                 _ = main._run_traversal_slot(context)
@@ -2750,13 +2516,21 @@ class TestCountdownHardening:
         def track_time_sleep(seconds: float) -> None:
             time_sleep_calls.append(seconds)
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=_make_options(tmp_path),
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
+        real_wait_for_duration = main._wait_for_duration
+
+        def track_wait_for_duration(seconds: float, *args: object, **kwargs: object) -> None:
+            if seconds == 2.0:
+                track_time_sleep(seconds)
+            real_wait_for_duration(seconds, *args, **kwargs)
 
         with patch("builtins.print"), \
              patch.object(main, "DiscordHandler", return_value=MagicMock()), \
@@ -2767,9 +2541,10 @@ class TestCountdownHardening:
              patch.object(main, "save_progress"), \
              patch.object(main, "jump_to_system", side_effect=fake_jump), \
              patch.object(main, "restock_tritium"), \
+             patch.object(main, "_wait_for_duration", side_effect=track_wait_for_duration), \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = track_time_sleep
             try:
                 _ = main._run_traversal_slot(context)
@@ -2832,12 +2607,14 @@ class TestJumpsLeftResumeDisplay:
         options = _make_options(tmp_path)
         options.route_position = 3
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=options,
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
 
         with patch("builtins.print"), \
@@ -2866,7 +2643,7 @@ class TestJumpsLeftResumeDisplay:
                  **{"_exit": MagicMock(side_effect=SystemExit(2))},
              ), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             try:
                 _ = main._run_traversal_slot(context)
@@ -2923,12 +2700,14 @@ class TestJumpsLeftResumeDisplay:
         options = _make_options(tmp_path)
         options.route_position = 1
 
+        clock = _ManualClock(start=1000.0)
         context = _make_runtime_context(
             options=options,
             sequence_queue=queue,
             journal=journal,
             slot_id=0,
             sleep=lambda _s: None,
+            clock=clock,
         )
 
         # Succeed for first 2 active jumps, then KeyboardInterrupt on 3rd
@@ -2963,7 +2742,7 @@ class TestJumpsLeftResumeDisplay:
                  **{"_exit": MagicMock(side_effect=SystemExit(2))},
              ), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             try:
                 _ = main._run_traversal_slot(context)
