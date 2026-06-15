@@ -25,6 +25,7 @@ from TraversalSystem.gui.workers import (
 )
 from TraversalSystem.gui_config import CarrierSlotConfig, GuiConfig, UniversalSettings
 from TraversalSystem.multi_journal_router import CTSJournalFacade, MultiJournalRouter
+from TraversalSystem.platform_utils import system_shutdown
 from TraversalSystem.sequence_queue import SequenceQueue
 from TraversalSystem.traversal_journal import JournalScanLoop
 from TraversalSystem.window_manager import WindowBinding
@@ -468,7 +469,23 @@ class WorkerController(QObject):
             self._stop_journal_runtime()
             self._shutdown_shared_sequence_queue(wait=True)
             self._shared_sequence_queue_dependency = None
+            self._maybe_shutdown_system()
         self.slot_finished.emit(slot_index, success)
+
+    def _maybe_shutdown_system(self) -> None:
+        """Trigger system shutdown when all carriers completed successfully
+        and the universal ``shutdown_on_complete`` setting is enabled."""
+        if self._config is None:
+            return
+        if not self._config.universal.shutdown_on_complete:
+            return
+        all_complete = all(
+            record.state_machine.state is WorkerState.COMPLETE
+            for record in self._records.values()
+        )
+        if all_complete and self._records:
+            logger.info("All carriers complete — initiating system shutdown.")
+            system_shutdown(30)
 
     def shutdown(self, *, wait: bool = True) -> None:
         _ = self.stop_all_active()
@@ -525,10 +542,9 @@ class WorkerController(QObject):
             tritium_slot=slot.tritium_slot,
             auto_plot_jumps=slot.auto_plot_jumps,
             disable_refuel=slot.disable_refuel,
-            power_saving=slot.power_saving,
             refuel_mode=slot.refuel_mode,
             single_discord_message=slot.single_discord_message,
-            shutdown_on_complete=slot.shutdown_on_complete,
+            shutdown_on_complete=False,
             multi_commander_enabled=universal.multi_commander_enabled,
             target_fid=slot.fid,
             auto_detect_window=universal.auto_detect_window,
