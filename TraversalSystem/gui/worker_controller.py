@@ -190,13 +190,35 @@ class WorkerController(QObject):
         binding_snapshots: Mapping[int, BindingSnapshot],
     ) -> None:
         self._config = config
-        self._shutdown_shared_sequence_queue(wait=True)
-        self._stop_journal_runtime()
-        self._shared_sequence_queue_dependency = None
+        has_active_records = any(
+            record.thread is not None or record.cancel_event is not None
+            for record in self._records.values()
+        )
+        if not has_active_records:
+            self._shutdown_shared_sequence_queue(wait=True)
+            self._stop_journal_runtime()
+            self._shared_sequence_queue_dependency = None
         next_records: dict[int, SlotRuntimeRecord] = {}
         for slot in config.carrier_slots:
             snapshot = binding_snapshots[slot.slot_index]
             worker_state = classification_to_worker_state(snapshot.classification)
+            existing = self._records.get(slot.slot_index)
+            is_active = existing is not None and (
+                existing.thread is not None or existing.cancel_event is not None
+            )
+            if is_active:
+                assert existing is not None
+                next_records[slot.slot_index] = SlotRuntimeRecord(
+                    slot=slot,
+                    binding=snapshot,
+                    state_machine=existing.state_machine,
+                    last_failure=existing.last_failure,
+                    thread=existing.thread,
+                    worker=existing.worker,
+                    cancel_event=existing.cancel_event,
+                )
+                continue
+
             next_records[slot.slot_index] = SlotRuntimeRecord(
                 slot=slot,
                 binding=snapshot,
@@ -204,6 +226,7 @@ class WorkerController(QObject):
                     self._slot_id(slot.slot_index),
                     worker_state,
                 ),
+                last_failure=existing.last_failure if existing is not None else None,
             )
         self._records = next_records
 
@@ -258,8 +281,13 @@ class WorkerController(QObject):
         def on_log(message: str, idx: int = slot_index) -> None:
             self.slot_log.emit(idx, message)
 
-        def on_finished(success: bool, idx: int = slot_index) -> None:
-            self._on_worker_finished(idx, success)
+        def on_finished(
+            success: bool,
+            idx: int = slot_index,
+            finished_worker: CarrierAutomationWorker = worker,
+            finished_thread: QThread = thread,
+        ) -> None:
+            self._on_worker_finished(idx, success, finished_worker, finished_thread)
 
         _ = thread.started.connect(worker.run)
         _ = worker.runtime_status.connect(on_runtime_status)
@@ -395,19 +423,48 @@ class WorkerController(QObject):
         if failure.kind is FailureKind.GLOBAL_DEPENDENCY:
             self._stop_peers_for_global_failure(slot_index)
 
-    def _on_worker_finished(self, slot_index: int, success: bool) -> None:
+    def _on_worker_finished(
+        self,
+        slot_index: int,
+        success: bool,
+        worker: CarrierAutomationWorker,
+        thread: QThread,
+    ) -> None:
         record = self._records[slot_index]
+        _ = thread
+        if record.worker is not worker:
+            return
         state = record.state_machine.state
-        if success and state in (WorkerState.STARTING, WorkerState.RUNNING, WorkerState.WAITING):
-            if record.state_machine.try_transition(WorkerState.COMPLETE):
-                self.slot_state_changed.emit(slot_index, WorkerState.COMPLETE.value)
-        elif not success and state is WorkerState.STOPPING:
-            if record.state_machine.try_transition(WorkerState.STOPPED):
-                self.slot_state_changed.emit(slot_index, WorkerState.STOPPED.value)
-        record.thread = None
-        record.worker = None
-        record.cancel_event = None
-        if all(item.thread is None for item in self._records.values()):
+        transitioned = False
+        if success:
+            if state is WorkerState.COMPLETE:
+                record.thread = None
+                record.worker = None
+                record.cancel_event = None
+                transitioned = True
+            elif state in (WorkerState.STARTING, WorkerState.RUNNING, WorkerState.WAITING):
+                if state in (WorkerState.STARTING, WorkerState.WAITING):
+                    _ = record.state_machine.try_transition(WorkerState.RUNNING)
+                if record.state_machine.try_transition(WorkerState.COMPLETE):
+                    record.thread = None
+                    record.worker = None
+                    record.cancel_event = None
+                    self.slot_state_changed.emit(slot_index, WorkerState.COMPLETE.value)
+                    transitioned = True
+        else:
+            if state in (WorkerState.ERROR, WorkerState.STOPPED):
+                record.thread = None
+                record.worker = None
+                record.cancel_event = None
+                transitioned = True
+            elif state is WorkerState.STOPPING:
+                if record.state_machine.try_transition(WorkerState.STOPPED):
+                    record.thread = None
+                    record.worker = None
+                    record.cancel_event = None
+                    self.slot_state_changed.emit(slot_index, WorkerState.STOPPED.value)
+                    transitioned = True
+        if transitioned and all(item.thread is None for item in self._records.values()):
             self._stop_journal_runtime()
             self._shutdown_shared_sequence_queue(wait=True)
             self._shared_sequence_queue_dependency = None
