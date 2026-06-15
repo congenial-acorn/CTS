@@ -2797,3 +2797,204 @@ def test_short_jump_countdown_clamps_to_zero(tmp_path: Path) -> None:
 
 def test_countdown_uses_cancel_aware_runtime_waits(tmp_path: Path) -> None:
     TestCountdownHardening().test_countdown_uses_cancel_aware_runtime_waits(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: jumps_left resume display correctness
+# ---------------------------------------------------------------------------
+
+class TestJumpsLeftResumeDisplay:
+    """jumps_left must report the correct remaining count when resuming
+    from a mid-route position.
+
+    The counter is decremented only for actively traversed systems (after
+    the ``if idx < state.line_no: continue`` skip guard). Skipped entries
+    must not affect the displayed value.
+
+    On a 5-system route resuming at position 3, active systems are idx=3
+    (done_first=False → "Flight Resumed") and idx=4 (done_first=True →
+    "Carrier Jump" with "Jumps remaining: 1").
+    """
+
+    def test_resume_from_position_3_reports_correct_remaining_count(
+        self, tmp_path: Path,
+    ) -> None:
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+        discord_mock = MagicMock()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.return_value = False
+        journal.reset_cancel.return_value = None
+        journal.reset_jump.return_value = None
+
+        options = _make_options(tmp_path)
+        options.route_position = 3
+
+        context = _make_runtime_context(
+            options=options,
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=discord_mock), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(
+                 main, "load_route_list",
+                 return_value=["S0", "S1", "S2", "S3", "S4"],
+             ), \
+             patch.object(
+                 main, "_find_newest_journal",
+                 return_value=tmp_path / "Journal.log",
+             ), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(
+                 main, "jump_to_system",
+                 return_value=(
+                     7,
+                     datetime.datetime.now(datetime.timezone.utc),
+                 ),
+             ), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(
+                 main, "os",
+                 **{"_exit": MagicMock(side_effect=SystemExit(2))},
+             ), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            try:
+                _ = main._run_traversal_slot(context)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+
+        post_calls = discord_mock.post_with_fields.call_args_list
+        titles = [c.args[0] for c in post_calls if c.args]
+
+        # idx=3: first active system, done_first=False, saved_resume=True
+        # → "Flight Resumed" (no jumps_left field)
+        assert "Flight Resumed" in titles, (
+            f"Expected 'Flight Resumed' for resumed route, got {titles}"
+        )
+
+        # idx=4: second active system, done_first=True, last system
+        # → "Carrier Jump" with "Jumps remaining: 1"
+        carrier_jump_calls = [
+            c for c in post_calls if c.args and c.args[0] == "Carrier Jump"
+        ]
+        assert len(carrier_jump_calls) == 1, (
+            f"Expected exactly one 'Carrier Jump', got {titles}"
+        )
+        jumps_remaining_field = carrier_jump_calls[0].args[5]
+        assert jumps_remaining_field == "Jumps remaining: 1", (
+            f"On a 5-system route resumed at position 3, the last active "
+            f"system (idx=4) must show 'Jumps remaining: 1'. "
+            f"Got '{jumps_remaining_field}'. Skipped entries (idx 0-2) "
+            f"must not decrement the counter."
+        )
+
+    def test_skipped_entries_do_not_decrement_active_remaining(
+        self, tmp_path: Path,
+    ) -> None:
+        """On a 5-system route resuming at position 1, the first active
+        iteration (idx=1) reports 'Jumps remaining: 4' via the 'Carrier
+        Jump' message on idx=2.
+
+        If skipped idx=0 decremented the counter, the value at idx=2
+        would be wrong (either too high if initial value isn't adjusted,
+        or too low if both the old decrement position and old initial
+        value were used).
+        """
+        main = _load_main_with_mocks(tmp_path)
+        queue = _FakeSequenceQueue()
+        discord_mock = MagicMock()
+
+        journal = MagicMock(spec=CTSJournalFacade)
+        journal.has_jumped.return_value = True
+        journal.jump_cancelled.return_value = False
+        journal.reset_cancel.return_value = None
+        journal.reset_jump.return_value = None
+
+        options = _make_options(tmp_path)
+        options.route_position = 1
+
+        context = _make_runtime_context(
+            options=options,
+            sequence_queue=queue,
+            journal=journal,
+            slot_id=0,
+            sleep=lambda _s: None,
+        )
+
+        # Succeed for first 2 active jumps, then KeyboardInterrupt on 3rd
+        jump_calls = 0
+
+        def fake_jump(
+            *_a: object, **_kw: object,
+        ) -> tuple[int, datetime.datetime]:
+            nonlocal jump_calls
+            jump_calls += 1
+            if jump_calls > 2:
+                raise KeyboardInterrupt
+            return 7, datetime.datetime.now(datetime.timezone.utc)
+
+        with patch("builtins.print"), \
+             patch.object(main, "DiscordHandler", return_value=discord_mock), \
+             patch.object(main, "Reshandler", _FakeResHandler), \
+             patch.object(
+                 main, "load_route_list",
+                 return_value=["S0", "S1", "S2", "S3", "S4"],
+             ), \
+             patch.object(
+                 main, "_find_newest_journal",
+                 return_value=tmp_path / "Journal.log",
+             ), \
+             patch.object(main, "consume_save", return_value=None), \
+             patch.object(main, "save_progress"), \
+             patch.object(main, "jump_to_system", side_effect=fake_jump), \
+             patch.object(main, "restock_tritium"), \
+             patch.object(
+                 main, "os",
+                 **{"_exit": MagicMock(side_effect=SystemExit(2))},
+             ), \
+             patch.object(main, "time") as fake_time:
+            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.sleep.side_effect = lambda _s: None
+            try:
+                _ = main._run_traversal_slot(context)
+            except (KeyboardInterrupt, SystemExit):
+                pass
+
+        post_calls = discord_mock.post_with_fields.call_args_list
+        carrier_jump_calls = [
+            c for c in post_calls if c.args and c.args[0] == "Carrier Jump"
+        ]
+        assert len(carrier_jump_calls) >= 1, (
+            f"Expected at least one 'Carrier Jump' message"
+        )
+        # idx=1: first active (done_first=False → "Flight Resumed")
+        # idx=2: second active (done_first=True → "Carrier Jump")
+        # At idx=2: jumps_left should be 3 (systems 2,3,4 remaining)
+        jumps_remaining_field = carrier_jump_calls[0].args[5]
+        assert jumps_remaining_field == "Jumps remaining: 3", (
+            f"On a 5-system route resumed at position 1, the 'Carrier "
+            f"Jump' at idx=2 must show 'Jumps remaining: 3'. "
+            f"Got '{jumps_remaining_field}'."
+        )
+
+
+def test_resume_from_position_3_reports_correct_remaining_count(
+    tmp_path: Path,
+) -> None:
+    TestJumpsLeftResumeDisplay().test_resume_from_position_3_reports_correct_remaining_count(tmp_path)
+
+
+def test_skipped_entries_do_not_decrement_active_remaining(
+    tmp_path: Path,
+) -> None:
+    TestJumpsLeftResumeDisplay().test_skipped_entries_do_not_decrement_active_remaining(tmp_path)

@@ -860,7 +860,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             print(f"Beginning in {countdown}...")
             runtime_context.wait(1)
 
-        jumps_left = len(route_list) + 1
+        jumps_left = len(route_list) + 1 - state.line_no
         final_line = route_list[-1]
 
         delta = datetime.timedelta()
@@ -882,9 +882,9 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         for idx, system in enumerate(route_list):
             clear_registered_jump_deadline()
             total_time = 0
-            jumps_left -= 1
             if idx < state.line_no:
                 continue
+            jumps_left -= 1
 
             runtime_context.wait(3)
             runtime_context.raise_if_cancelled()

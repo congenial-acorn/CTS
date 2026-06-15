@@ -160,6 +160,7 @@ class SequenceQueue:
                 self._condition.notify_all()
 
     def can_start_restock(self, *, estimated_duration: float) -> bool:
+        """Public inspection helper: check whether a restock of *estimated_duration* would finish before the earliest pending jump deadline; production scheduling still happens inside ``_select_next_locked``."""
         with self._condition:
             deadline = self._earliest_jump_deadline_locked()
             if deadline is None:
