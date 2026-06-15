@@ -171,6 +171,25 @@ def slight_random_time(base: float) -> float:
     return random.random() + base
 
 
+def _wait_for_duration(
+    seconds: float,
+    *,
+    runtime_context: TraversalRuntimeContext | None = None,
+    cancel_event: threading.Event | None = None,
+    randomize: bool = True,
+) -> None:
+    delay = slight_random_time(seconds) if randomize else seconds
+    if runtime_context is not None:
+        runtime_context.wait(delay)
+        runtime_context.raise_if_cancelled()
+        return
+    if cancel_event is not None:
+        if cancel_event.wait(delay):
+            raise TraversalStopped("Traversal cancelled.")
+        return
+    time.sleep(delay)
+
+
 def load_route_list(route_file: Path) -> List[str]:
     if route_file.suffix.lower() == ".csv":
         return _load_carrier_csv(route_file)
@@ -222,6 +241,7 @@ def follow_button_sequence(
     sequence_name: str,
     *,
     focus_handler: InputHandlerAdapter | None = None,
+    runtime_context: TraversalRuntimeContext | None = None,
 ) -> None:
     handler = _resolve_input_handler(focus_handler)
     sequence_path = sequence_dir / sequence_name
@@ -233,11 +253,18 @@ def follow_button_sequence(
         return
 
     for line in sequence_path.read_text(encoding="utf-8").splitlines():
+        if runtime_context is not None:
+            runtime_context.raise_if_cancelled()
         if ":" in line:
             key, duration = line.split(":", 1)
             handler.keyDown(key)
-            time.sleep(slight_random_time(float(duration)))
-            handler.keyUp(key)
+            try:
+                _wait_for_duration(
+                    float(duration),
+                    runtime_context=runtime_context,
+                )
+            finally:
+                handler.keyUp(key)
         else:
             wait_time = 0.1
             key = line
@@ -247,7 +274,10 @@ def follow_button_sequence(
                 wait_time = float(wait_raw)
 
             handler.press(key)
-            time.sleep(slight_random_time(wait_time))
+            _wait_for_duration(
+                wait_time,
+                runtime_context=runtime_context,
+            )
 
 
 def restock_tritium(
@@ -255,8 +285,11 @@ def restock_tritium(
     sequence_dir: Path,
     *,
     focus_handler: InputHandlerAdapter | None = None,
+    runtime_context: TraversalRuntimeContext | None = None,
 ) -> None:
     handler = _resolve_input_handler(focus_handler)
+    if runtime_context is not None:
+        runtime_context.raise_if_cancelled()
     if not options.auto_plot_jumps or options.disable_refuel:
         return
 
@@ -268,25 +301,27 @@ def restock_tritium(
                 sequence_dir,
                 f"squadron/{step}.txt",
                 focus_handler=handler,
+                runtime_context=runtime_context,
             )
         else:
             follow_button_sequence(
                 sequence_dir,
                 f"{step}.txt",
                 focus_handler=handler,
+                runtime_context=runtime_context,
             )
 
         if step == "open_cargo_transfer":
             if options.refuel_mode == 1:
                 handler.press("w")
-                time.sleep(slight_random_time(0.1))
+                _wait_for_duration(0.1, runtime_context=runtime_context)
 
             for _ in range(options.tritium_slot):
                 if options.refuel_mode in (1, 2):
                     handler.press("s")
                 else:
                     handler.press("w")
-                time.sleep(slight_random_time(0.1))
+                _wait_for_duration(0.1, runtime_context=runtime_context)
 
     print("Refuel process completed.")
 
@@ -317,37 +352,41 @@ def jump_to_system(
             sequence_dir,
             "squadron/jump_nav_1.txt",
             focus_handler=handler,
+            runtime_context=runtime_context,
         )
     else:
         follow_button_sequence(
             sequence_dir,
             "jump_nav_1.txt",
             focus_handler=handler,
+            runtime_context=runtime_context,
         )
 
     if runtime_context is not None:
         runtime_context.raise_if_cancelled()
 
     handler.moveTo(res_handler.sysNameX, res_handler.sysNameUpperY)
-    time.sleep(slight_random_time(0.1))
+    _wait_for_duration(0.1, runtime_context=runtime_context)
     handler.press("space")
     pyperclip.copy(system_name.lower())
-    time.sleep(slight_random_time(1.0))
+    _wait_for_duration(1.0, runtime_context=runtime_context)
     handler.keyDown("ctrl")
-    time.sleep(slight_random_time(0.1))
-    handler.press("v")
-    time.sleep(slight_random_time(0.1))
-    handler.keyUp("ctrl")
-    time.sleep(slight_random_time(3.0))
+    try:
+        _wait_for_duration(0.1, runtime_context=runtime_context)
+        handler.press("v")
+        _wait_for_duration(0.1, runtime_context=runtime_context)
+    finally:
+        handler.keyUp("ctrl")
+    _wait_for_duration(3.0, runtime_context=runtime_context)
     handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
-    time.sleep(slight_random_time(0.1))
+    _wait_for_duration(0.1, runtime_context=runtime_context)
     handler.press("space")
-    time.sleep(slight_random_time(0.1))
+    _wait_for_duration(0.1, runtime_context=runtime_context)
     handler.moveTo(res_handler.jumpButtonX, res_handler.jumpButtonY)
-    time.sleep(slight_random_time(0.1))
+    _wait_for_duration(0.1, runtime_context=runtime_context)
     handler.press("space")
 
-    time.sleep(6)
+    _wait_for_duration(6, runtime_context=runtime_context, randomize=False)
 
     facade = cast(CTSJournalFacade, journal)
     if facade.last_carrier_request() != system_name:
@@ -356,6 +395,7 @@ def jump_to_system(
             sequence_dir,
             "jump_fail.txt",
             focus_handler=handler,
+            runtime_context=runtime_context,
         )
         return 0, 0
 
@@ -370,7 +410,7 @@ def jump_to_system(
     delta = departure_time - current_time
 
     handler.press("backspace")
-    time.sleep(slight_random_time(0.1))
+    _wait_for_duration(0.1, runtime_context=runtime_context)
     handler.press("backspace")
 
     return int(delta.total_seconds()), departure_time
@@ -546,6 +586,7 @@ def _run_coordinated_restock(
     sequence_queue: object | None,
     queue_slot_id: str | None,
     cancel_event: threading.Event,
+    runtime_context: TraversalRuntimeContext | None = None,
     options: TraversalOptions,
     sequence_dir: Path,
     focus_handler: InputHandlerAdapter | None,
@@ -562,6 +603,7 @@ def _run_coordinated_restock(
             options,
             sequence_dir,
             focus_handler=focus_handler,
+            runtime_context=runtime_context,
         )
         return
 
@@ -571,20 +613,26 @@ def _run_coordinated_restock(
             options,
             sequence_dir,
             focus_handler=focus_handler,
+            runtime_context=runtime_context,
         )
         return
+
+    effective_cancel_event = (
+        runtime_context.cancel_event if runtime_context is not None else cancel_event
+    )
 
     handle = cast(
         SubmissionHandleAdapter,
         submit_restock(
-        slot_id=queue_slot_id,
-        run=lambda: restock_tritium(
-            options,
-            sequence_dir,
-            focus_handler=focus_handler,
-        ),
-        estimated_duration=DEFAULT_RESTOCK_ESTIMATE_SECONDS,
-        cancel_event=cancel_event,
+            slot_id=queue_slot_id,
+            run=lambda: restock_tritium(
+                options,
+                sequence_dir,
+                focus_handler=focus_handler,
+                runtime_context=runtime_context,
+            ),
+            estimated_duration=DEFAULT_RESTOCK_ESTIMATE_SECONDS,
+            cancel_event=effective_cancel_event,
         ),
     )
     _ = handle.result()
@@ -619,52 +667,63 @@ def open_game(
     discord_messenger: DiscordHandler,
     route_name: str,
     focus_handler: InputHandlerAdapter | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     handler = _resolve_input_handler(focus_handler)
-    print("Re-opening game...")
+    try:
+        if cancel_event is not None and cancel_event.is_set():
+            return
 
-    open_steam_game("359320")
-    time.sleep(60)
+        print("Re-opening game...")
 
-    journal_path = _find_newest_journal(options.journal_directory)
+        open_steam_game("359320")
+        _wait_for_duration(60, cancel_event=cancel_event, randomize=False)
 
-    menu_loaded = False
-    while not menu_loaded:
-        content = journal_path.read_text(encoding="utf-8")
-        if "Fileheader" in content:
-            print("Menu loaded")
-            menu_loaded = True
-        else:
-            print("Menu not loaded...")
-            time.sleep(10)
+        journal_path = _find_newest_journal(options.journal_directory)
 
-    time.sleep(10)
+        menu_loaded = False
+        while not menu_loaded:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            content = journal_path.read_text(encoding="utf-8")
+            if "Fileheader" in content:
+                print("Menu loaded")
+                menu_loaded = True
+            else:
+                print("Menu not loaded...")
+                _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
 
-    print("Starting game...")
-    handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
-    handler.click()
-    follow_button_sequence(
-        SEQUENCE_DIR,
-        "start_game.txt",
-        focus_handler=handler,
-    )
+        _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
 
-    loaded = False
-    while not loaded:
-        content = journal_path.read_text(encoding="utf-8")
-        if "Location" in content:
-            print("Game loaded")
-            loaded = True
-        else:
-            print("Game not loaded...")
-            handler.press("space")
-            time.sleep(10)
+        print("Starting game...")
+        handler.moveTo(res_handler.sysNameX, res_handler.sysNameLowerY)
+        handler.click()
+        follow_button_sequence(
+            SEQUENCE_DIR,
+            "start_game.txt",
+            focus_handler=handler,
+        )
 
-    print("Switching to new journal...")
-    facade = cast(CTSJournalFacade, journal_dep)
-    facade.reset_jump()
-    state.stop_journal.clear()
-    state.game_ready = True
+        loaded = False
+        while not loaded:
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            content = journal_path.read_text(encoding="utf-8")
+            if "Location" in content:
+                print("Game loaded")
+                loaded = True
+            else:
+                print("Game not loaded...")
+                handler.press("space")
+                _wait_for_duration(10, cancel_event=cancel_event, randomize=False)
+
+        print("Switching to new journal...")
+        facade = cast(CTSJournalFacade, journal_dep)
+        facade.reset_jump()
+        state.stop_journal.clear()
+        state.game_ready = True
+    except TraversalStopped:
+        return
 
 
 def run_traversal(
@@ -876,6 +935,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         SEQUENCE_DIR,
                         "close_game.txt",
                         focus_handler=focus_dependency,
+                        runtime_context=runtime_context,
                     )
                     threading.Timer(
                         time_to_jump,
@@ -888,6 +948,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             discord_messenger,
                             route_name,
                             focus_dependency,
+                            runtime_context.cancel_event,
                         ),
                     ).start()
                     state.game_ready = False
@@ -1066,6 +1127,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                 sequence_queue=sequence_queue,
                                 queue_slot_id=queue_slot_id,
                                 cancel_event=runtime_context.cancel_event,
+                                runtime_context=runtime_context,
                                 options=options,
                                 sequence_dir=SEQUENCE_DIR,
                                 focus_handler=focus_dependency,

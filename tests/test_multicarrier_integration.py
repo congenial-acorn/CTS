@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -120,6 +120,52 @@ class _ManualClock:
     def advance(self, seconds: float) -> None:
         with self._lock:
             self._now += seconds
+
+
+class _SteppingClock:
+    """Monotonic clock stub that advances by *step* seconds on every call.
+
+    Useful for simulating elapsed wall-clock time during restock without
+    real sleeping.
+    """
+
+    def __init__(self, *, start: float = 1000.0, step: float = 400.0) -> None:
+        self._now = start
+        self._step = step
+
+    def now(self) -> float:
+        current = self._now
+        self._now += self._step
+        return current
+
+
+class _RecordingInputHandler:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def press(self, key: str) -> None:
+        self.calls.append(("press", key))
+
+    def keyDown(self, key: str) -> None:
+        self.calls.append(("keyDown", key))
+
+    def keyUp(self, key: str) -> None:
+        self.calls.append(("keyUp", key))
+
+
+class _CancellingSequenceRuntimeContext:
+    def __init__(self) -> None:
+        self.cancel_event = threading.Event()
+        self.wait_calls: list[float] = []
+
+    def wait(self, seconds: float) -> None:
+        self.wait_calls.append(seconds)
+        self.cancel_event.set()
+        raise TraversalStopped("Traversal cancelled.")
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancel_event.is_set():
+            raise TraversalStopped("Traversal cancelled.")
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +501,51 @@ class TestPowerSavingCooldownTiming:
 
         assert result is False
         assert saved_indices == [0]
+
+
+class TestSequenceCancellationAwareWaits:
+    def test_follow_button_sequence_cancels_before_long_wait_completes(
+        self, tmp_path: Path,
+    ) -> None:
+        main = _load_main_with_mocks(tmp_path)
+        (tmp_path / "long_wait.txt").write_text("space-5\nenter\n", encoding="utf-8")
+        handler = _RecordingInputHandler()
+        runtime_context = _CancellingSequenceRuntimeContext()
+
+        with pytest.raises(TraversalStopped, match="Traversal cancelled"):
+            cast(Any, main).follow_button_sequence(
+                tmp_path,
+                "long_wait.txt",
+                focus_handler=handler,
+                runtime_context=runtime_context,
+            )
+
+        assert len(runtime_context.wait_calls) == 1
+        assert runtime_context.wait_calls[0] >= 5.0
+        assert handler.calls == [("press", "space")]
+
+    def test_follow_button_sequence_releases_held_key_on_cancellation(
+        self, tmp_path: Path,
+    ) -> None:
+        main = _load_main_with_mocks(tmp_path)
+        (tmp_path / "held_key.txt").write_text("shift:5\nspace\n", encoding="utf-8")
+        handler = _RecordingInputHandler()
+        runtime_context = _CancellingSequenceRuntimeContext()
+
+        with pytest.raises(TraversalStopped, match="Traversal cancelled"):
+            cast(Any, main).follow_button_sequence(
+                tmp_path,
+                "held_key.txt",
+                focus_handler=handler,
+                runtime_context=runtime_context,
+            )
+
+        assert len(runtime_context.wait_calls) == 1
+        assert runtime_context.wait_calls[0] >= 5.0
+        assert handler.calls == [
+            ("keyDown", "shift"),
+            ("keyUp", "shift"),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +935,7 @@ def _run_restock_cycle(
     tmp_path: Path,
     *,
     restock_failure: BaseException | None = None,
+    monotonic_side_effect: Callable[[], float] | None = None,
 ) -> tuple[_FakeSequenceQueue, list[str]]:
     main = _load_main_with_mocks(tmp_path)
     order: list[str] = []
@@ -890,7 +982,7 @@ def _run_restock_cycle(
          patch.object(main, "restock_tritium", side_effect=record_restock), \
          patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
          patch.object(main, "time") as fake_time:
-        fake_time.monotonic.side_effect = time.monotonic
+        fake_time.monotonic.side_effect = monotonic_side_effect or time.monotonic
         fake_time.sleep.side_effect = fast_sleep
         if restock_failure is None:
             assert main._run_traversal_slot(context) is False
@@ -1017,6 +1109,39 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
         sleep_side_effect=lambda _seconds: None,
     )
     assert failure_queue.deadlines == {}
+
+
+def test_restock_exceeding_remaining_cooldown_clamps_and_clears_deadline(
+    tmp_path: Path,
+) -> None:
+    """Edge case: restock actual elapsed time exceeding remaining cooldown.
+
+    When restock takes longer than the remaining cooldown (and longer than
+    the 60s estimate), total_time must clamp safely to zero so no past-due
+    jump deadline is registered and no stale deadline remains in the map.
+
+    Uses a _SteppingClock so each time.monotonic() call advances 400s.
+    After the cooldown loop reaches total_time=300, the two monotonic calls
+    bracketing the restock are 400s apart — far exceeding both the 60s
+    estimate and the 300s remaining cooldown.
+    """
+    clock = _SteppingClock(start=1000.0, step=400.0)
+    queue, _order = _run_restock_cycle(
+        tmp_path,
+        monotonic_side_effect=clock.now,
+    )
+
+    # Exactly one register call (the initial 362s deadline before the
+    # cooldown loop).  The second register that normally happens after
+    # restock is skipped because total_time clamped to 0.
+    assert len(queue.register_calls) == 1
+    assert queue.register_calls[0][0] == "slot-0"
+
+    # The pre-restock clear removed the deadline, and the clamped
+    # total_time prevented re-registration, so the map is clean.
+    assert queue.deadlines == {}
+    assert "slot-0" in queue.clear_calls
+
 
 # ---------------------------------------------------------------------------
 # Task 8: focus-failure blocks input dispatch
