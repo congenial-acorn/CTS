@@ -748,3 +748,63 @@ def test_cli_fallback_uses_direct_jump_to_system_without_queue(
 
     assert result == expected_result
     jump_to_system_mock.assert_called_once()
+
+
+def test_estimate_restock_duration_scales_with_tritium_slot(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+
+    assert main.estimate_restock_duration(0) == main.RESTOCK_FIXED_OVERHEAD_SECONDS
+
+    per_slot = main.RESTOCK_PER_SLOT_SECONDS
+    assert main.estimate_restock_duration(100) == pytest.approx(
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS + per_slot * 100
+    )
+    assert main.estimate_restock_duration(500) == pytest.approx(
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS + per_slot * 500
+    )
+
+
+def test_coordinated_restock_passes_dynamic_estimate_to_queue(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    options = _make_options(tmp_path)
+    options.tritium_slot = 200
+    queue = MagicMock()
+    queue.submit_restock.return_value = MagicMock()
+
+    with patch.object(main, "restock_tritium"):
+        main._run_coordinated_restock(
+            sequence_queue=queue,
+            queue_slot_id="slot-0",
+            cancel_event=threading.Event(),
+            runtime_context=None,
+            options=options,
+            sequence_dir=tmp_path,
+            focus_handler=None,
+        )
+
+    queue.submit_restock.assert_called_once()
+    submitted_duration = queue.submit_restock.call_args.kwargs["estimated_duration"]
+    expected = main.RESTOCK_FIXED_OVERHEAD_SECONDS + main.RESTOCK_PER_SLOT_SECONDS * 200
+    assert submitted_duration == pytest.approx(expected)
+    assert submitted_duration != main.DEFAULT_RESTOCK_ESTIMATE_SECONDS
+
+
+def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    options = _make_options(tmp_path, auto_plot_jumps=False)
+    options.disable_refuel = False
+    queue = MagicMock()
+    queue.submit_restock.return_value = MagicMock()
+
+    main._run_coordinated_restock(
+        sequence_queue=queue,
+        queue_slot_id="slot-0",
+        cancel_event=threading.Event(),
+        runtime_context=None,
+        options=options,
+        sequence_dir=tmp_path,
+        focus_handler=None,
+    )
+
+    queue.submit_restock.assert_not_called()
+

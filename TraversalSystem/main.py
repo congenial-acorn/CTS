@@ -63,6 +63,13 @@ SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
 DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS = 30.0
 DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
+RESTOCK_FIXED_OVERHEAD_SECONDS = 30.0
+RESTOCK_PER_SLOT_SECONDS = 0.6
+JOURNAL_CONFIRMATION_TIMEOUT_SECONDS = 300.0
+
+
+def estimate_restock_duration(tritium_slot: int) -> float:
+    return RESTOCK_FIXED_OVERHEAD_SECONDS + RESTOCK_PER_SLOT_SECONDS * tritium_slot
 
 
 def resolve_save_path(base_dir: Path, *, slot_id: int) -> Path:
@@ -596,7 +603,7 @@ def _run_coordinated_restock(
     Automation blocks (jump/restock) are serialized.
     Retries stay outside queue blocks.
     """
-    if options.disable_refuel:
+    if options.disable_refuel or not options.auto_plot_jumps:
         return
     if sequence_queue is None or queue_slot_id is None:
         restock_tritium(
@@ -631,7 +638,7 @@ def _run_coordinated_restock(
                 focus_handler=focus_handler,
                 runtime_context=runtime_context,
             ),
-            estimated_duration=DEFAULT_RESTOCK_ESTIMATE_SECONDS,
+            estimated_duration=estimate_restock_duration(options.tritium_slot),
             cancel_event=effective_cancel_event,
         ),
     )
