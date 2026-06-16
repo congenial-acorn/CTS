@@ -50,11 +50,13 @@ class JournalScanLoop:
         *,
         error_callback: Callable[[Exception], None] | None = None,
         fail_fast: bool = False,
+        poll_interval: float = 1.0,
     ) -> None:
         self.router: _ScanOnce = router
         self.journal_dir: Path = journal_dir
         self._error_callback: Callable[[Exception], None] | None = error_callback
         self._fail_fast: bool = fail_fast
+        self._poll_interval: float = poll_interval
         self._stop: threading.Event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -77,5 +79,5 @@ class JournalScanLoop:
                     logger.warning("Journal scan_once error: %s", exc)
                 if self._fail_fast:
                     break
-            _ = self._stop.wait(1.0)
+            _ = self._stop.wait(self._poll_interval)
         print("Journal scan loop halted")
