@@ -53,8 +53,9 @@ class JournalRuntime:
         journal_dir: Path,
         *,
         error_callback: Callable[[Exception], None] | None = None,
+        router: MultiJournalRouter | None = None,
     ) -> None:
-        self.router: MultiJournalRouter = MultiJournalRouter()
+        self.router = router if router is not None else MultiJournalRouter()
         self._journal_dir: Path = journal_dir
         self._scan_loop: JournalScanLoop = JournalScanLoop(
             self.router,
@@ -122,6 +123,7 @@ def _run_default_traversal(
     sequence_queue: object = None,
     cancel_event: threading.Event | None = None,
     status_callback: Callable[[str], None] | None = None,
+    slot_id: int | None = None,
 ) -> bool:
     from TraversalSystem.runtime.controller import TraversalController
 
@@ -137,6 +139,7 @@ def _run_default_traversal(
             sequence_queue=sequence_queue,
             cancel_event=cancel_event,
             status_callback=status_callback,
+            slot_id=slot_id,
         )
     )
 
@@ -169,6 +172,7 @@ class WorkerController(QObject):
         focus_dependency_factory: FocusDependencyFactory = default_focus_dependency_factory,
         sequence_queue_dependency_factory: SequenceQueueDependencyFactory = default_sequence_queue_dependency_factory,
         failure_classifier: FailureClassifier | None = None,
+        router: MultiJournalRouter | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -184,6 +188,7 @@ class WorkerController(QObject):
         self._records: dict[int, SlotRuntimeRecord] = {}
         self._journal_runtime: JournalRuntime | None = None
         self._shared_sequence_queue_dependency: object | None = None
+        self._shared_router: MultiJournalRouter | None = router
 
     def sync_slots(
         self,
@@ -383,7 +388,13 @@ class WorkerController(QObject):
         """
         if self._journal_runtime is not None:
             return self._journal_runtime
-        runtime = self._journal_runtime_factory(universal)
+        if self._shared_router is not None:
+            runtime = JournalRuntime(
+                Path(universal.journal_directory),
+                router=self._shared_router,
+            )
+        else:
+            runtime = self._journal_runtime_factory(universal)
         runtime.start()
         self._journal_runtime = runtime
         return runtime

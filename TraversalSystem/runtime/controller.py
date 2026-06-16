@@ -70,6 +70,11 @@ def coerce_traversal_options(
         refuel_mode=_as_int(mapping.get("refuel_mode"), 0),
         single_discord_message=bool(mapping.get("single_discord_message", False)),
         shutdown_on_complete=bool(mapping.get("shutdown_on_complete", True)),
+        multi_commander_enabled=bool(mapping.get("multi_commander_enabled", False)),
+        target_fid=str(mapping.get("target_fid", "")),
+        auto_detect_window=bool(mapping.get("auto_detect_window", True)),
+        focus_timeout_seconds=_as_int(mapping.get("focus_timeout_seconds"), 5),
+        ambiguous_window_policy=str(mapping.get("ambiguous_window_policy", "abort")),
     )
 
 

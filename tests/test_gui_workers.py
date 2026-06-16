@@ -1196,3 +1196,107 @@ def test_per_slot_options_use_slot_values_not_universal(
 
     _wait_for_controller_idle(qapp, controller, [0, 1])
     controller.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 regression: _run_default_traversal must accept & forward slot_id
+# ---------------------------------------------------------------------------
+
+
+def test_run_default_traversal_forwards_slot_id() -> None:
+    """``_run_default_traversal`` is the default ``TraversalRunner`` used by
+    ``WorkerController``.  The worker (``workers.py``) invokes it with
+    ``slot_id=<slot index>``.  Before the fix this raised ``TypeError``.
+
+    After the fix the function must accept ``slot_id`` and forward it to
+    ``TraversalController().run(slot_id=...)``.
+    """
+    from TraversalSystem.gui.worker_controller import _run_default_traversal
+
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    options = MagicMock(name="options")
+    fake_main = MagicMock(name="main-module")
+    fake_main._run_traversal_slot = MagicMock(name="traversal-slot")
+    with patch("TraversalSystem.runtime.controller.TraversalController") as MockController:
+        MockController.return_value.run = fake_run
+        with patch(
+            "TraversalSystem.gui.worker_controller.importlib.import_module",
+            return_value=fake_main,
+        ):
+            result = _run_default_traversal(options, slot_id=3)
+
+    # No TypeError raised, and the value is forwarded.
+    assert result is True
+    assert captured.get("slot_id") == 3
+    # Other keyword arguments are still forwarded unchanged.
+    assert captured.get("journal") is None
+    assert captured.get("status_callback") is None
+
+    # Default behaviour (slot_id omitted) must remain backwards compatible.
+    captured.clear()
+    with patch("TraversalSystem.runtime.controller.TraversalController") as MockController2:
+        MockController2.return_value.run = fake_run
+        with patch(
+            "TraversalSystem.gui.worker_controller.importlib.import_module",
+            return_value=fake_main,
+        ):
+            result_default = _run_default_traversal(options)
+
+    assert result_default is True
+    assert captured.get("slot_id") is None
+
+
+# ---------------------------------------------------------------------------
+# Bug 6a regression: shared MultiJournalRouter injection
+# ---------------------------------------------------------------------------
+
+
+def test_shared_router_injection(tmp_path: Path) -> None:
+    """``JournalRuntime`` and ``WorkerController`` must accept an optional
+    external ``MultiJournalRouter`` so that the main window's
+    ``BindingController`` and the worker controller can share a single
+    router instance instead of each creating (and potentially diverging
+    from) their own.
+    """
+    from TraversalSystem.multi_journal_router import MultiJournalRouter
+
+    shared_router = MultiJournalRouter()
+
+    # JournalRuntime uses the injected router instead of creating its own.
+    runtime = JournalRuntime(tmp_path, router=shared_router)
+    assert runtime.router is shared_router
+
+    # WorkerController stores the injected router for lazy JournalRuntime creation.
+    controller = WorkerController(router=shared_router)
+    assert getattr(controller, "_shared_router") is shared_router
+
+    # The lazily-created shared JournalRuntime must use the same router.
+    universal = UniversalSettings(
+        webhook_url="https://example.invalid/hook",
+        journal_directory=str(tmp_path / "journals"),
+        multi_commander_enabled=True,
+        focus_timeout_seconds=7,
+        single_discord_message=True,
+        shutdown_on_complete=False,
+    )
+    shared_runtime = controller._get_shared_journal_runtime(universal)
+    assert shared_runtime.router is shared_router
+    assert getattr(controller, "_journal_runtime") is shared_runtime
+    controller.shutdown(wait=True)
+
+
+def test_default_router_is_created_when_none_injected(tmp_path: Path) -> None:
+    """When no router is supplied, ``JournalRuntime`` must still create its own
+    ``MultiJournalRouter`` (backwards-compatible default behaviour)."""
+    from TraversalSystem.multi_journal_router import MultiJournalRouter
+
+    runtime = JournalRuntime(tmp_path)
+    assert isinstance(runtime.router, MultiJournalRouter)
+
+    controller = WorkerController()
+    assert getattr(controller, "_shared_router") is None

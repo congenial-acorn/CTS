@@ -665,6 +665,7 @@ def run_traversal(
     journal: object = None,
     window: object = None,
     focus: object = None,
+    sequence_queue: object = None,
     cancel_event: threading.Event | None = None,
     status_callback=None,
     controller: TraversalController | None = None,
@@ -677,6 +678,7 @@ def run_traversal(
         journal=journal,
         window=window,
         focus=focus,
+        sequence_queue=sequence_queue,
         cancel_event=cancel_event,
         status_callback=status_callback,
         slot_id=slot_id,
@@ -981,43 +983,44 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         discord_messenger.update_fields(6, 7)
                     case 320:
                         discord_messenger.update_fields(7, 7)
-                    case 300:
-                        print("\nPausing execution until jump is confirmed...")
-                        completed = False
-                        while not completed:
-                            runtime_context.transition("waiting")
-                            runtime_context.raise_if_cancelled()
-                            if journal.jump_cancelled():
-                                return _handle_jump_cancelled(system, revert_index=True)
-                            completed = journal.has_jumped()
-                            if not completed:
-                                print("Jump not complete...")
-                                runtime_context.wait(10)
-                        assert cooldown_deadline is not None
-                        total_time = max(0, int(cooldown_deadline - time.monotonic()))
-                        print("Jump complete!")
-                        runtime_context.transition("running")
-                        discord_messenger.update_fields(8, 7)
-                        print("Submitting tritium restock to shared queue...")
-                        clear_registered_jump_deadline()
-                        restock_started_at = time.monotonic()
-                        _run_coordinated_restock(
-                            sequence_queue=sequence_queue,
-                            queue_slot_id=queue_slot_id,
-                            cancel_event=runtime_context.cancel_event,
-                            runtime_context=runtime_context,
-                            options=options,
-                            sequence_dir=SEQUENCE_DIR,
-                            focus_handler=focus_dependency,
-                        )
-                        restock_elapsed = time.monotonic() - restock_started_at
-                        total_time = max(0, total_time - int(restock_elapsed))
-                        if idx + 1 < len(route_list) and total_time > 0:
-                            register_next_jump_deadline(total_time)
                     case 151:
                         discord_messenger.update_fields(8, 8)
                     case 100:
                         discord_messenger.update_fields(8, 9)
+
+                if total_time == 300:
+                    print("\nPausing execution until jump is confirmed...")
+                    completed = False
+                    while not completed:
+                        runtime_context.transition("waiting")
+                        runtime_context.raise_if_cancelled()
+                        if journal.jump_cancelled():
+                            return _handle_jump_cancelled(system, revert_index=True)
+                        completed = journal.has_jumped()
+                        if not completed:
+                            print("Jump not complete...")
+                            runtime_context.wait(10)
+                    assert cooldown_deadline is not None
+                    total_time = max(0, int(cooldown_deadline - time.monotonic()))
+                    print("Jump complete!")
+                    runtime_context.transition("running")
+                    discord_messenger.update_fields(8, 7)
+                    print("Submitting tritium restock to shared queue...")
+                    clear_registered_jump_deadline()
+                    restock_started_at = time.monotonic()
+                    _run_coordinated_restock(
+                        sequence_queue=sequence_queue,
+                        queue_slot_id=queue_slot_id,
+                        cancel_event=runtime_context.cancel_event,
+                        runtime_context=runtime_context,
+                        options=options,
+                        sequence_dir=SEQUENCE_DIR,
+                        focus_handler=focus_dependency,
+                    )
+                    restock_elapsed = time.monotonic() - restock_started_at
+                    total_time = max(0, total_time - int(restock_elapsed))
+                    if idx + 1 < len(route_list) and total_time > 0:
+                        register_next_jump_deadline(total_time)
 
                 runtime_context.wait(1)
                 total_time -= 1

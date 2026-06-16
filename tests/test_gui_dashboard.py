@@ -150,6 +150,7 @@ def worker_controller():
             self._start_slot_return = False
             self._stop_slot_return = False
             self._slot_state_return = WorkerState.READY
+            self.sync_slots_calls = []
         
         def start_all_ready(self):
             return self._start_all_ready_return
@@ -165,7 +166,10 @@ def worker_controller():
         
         def slot_state(self, slot_index):
             return self._slot_state_return
-    
+
+        def sync_slots(self, config, binding_snapshots):
+            self.sync_slots_calls.append((config, binding_snapshots))
+
     mock_wc = MockWorkerController()
     return mock_wc
 
@@ -798,4 +802,81 @@ def test_start_all_emits_no_ready_carriers(qapp, config, binding_controller, wor
     dashboard.start_all_button.click()
     
     assert "No ready carriers" in calls
+
+
+# ---------------------------------------------------------------------------
+# Test: sync_slots called immediately after binding updates (Bug 7)
+# ---------------------------------------------------------------------------
+
+class TestSyncSlotsAfterBinding:
+    """Test that worker_controller.sync_slots() is called immediately after
+    manual bind or use-discovered-commander updates the binding snapshots,
+    without waiting for the 5-second background timer."""
+
+    def test_sync_slots_called_after_manual_bind(
+        self, qapp, config, binding_controller, worker_controller,
+        window_info, monkeypatch,
+    ):
+        dashboard = DashboardWidget(config, binding_controller, worker_controller)
+
+        # Slot 0 is in NEEDS_MANUAL_BINDING with a candidate window
+        dashboard.binding_snapshots[0] = BindingSnapshot(
+            classification=SlotClassification.NEEDS_MANUAL_BINDING,
+            fid="F123",
+            commander_name="Cmdr1",
+            window_binding=None,
+            discovered_commander=None,
+            candidate_windows=[window_info],
+        )
+
+        # Mock manual_bind to return a READY snapshot
+        bound_snapshot = BindingSnapshot(
+            classification=SlotClassification.READY,
+            fid="F123",
+            commander_name="Cmdr1",
+            window_binding=WindowBinding.from_window(
+                target_fid="F123",
+                startup_identity="manual:0",
+                window=window_info,
+            ),
+            discovered_commander=config.discovered_commanders[0],
+            candidate_windows=[window_info],
+        )
+        binding_controller.manual_bind = Mock(return_value=bound_snapshot)
+
+        # Patch ManualBindDialog.exec to emit window_selected then return
+        from TraversalSystem.gui.dashboard import ManualBindDialog
+
+        def emit_then_return(self):
+            self.window_selected.emit(window_info)
+            return 1
+
+        monkeypatch.setattr(ManualBindDialog, "exec", emit_then_return)
+
+        dashboard._on_manual_bind(0)
+
+        assert len(worker_controller.sync_slots_calls) == 1
+        called_config, called_snapshots = worker_controller.sync_slots_calls[0]
+        assert called_config is config
+        assert called_snapshots is dashboard.binding_snapshots
+
+    def test_sync_slots_called_after_use_discovered(
+        self, qapp, config, binding_controller, worker_controller, monkeypatch,
+    ):
+        dashboard = DashboardWidget(config, binding_controller, worker_controller)
+
+        from TraversalSystem.gui.dashboard import UseDiscoveredCommanderDialog
+
+        def emit_then_return(self):
+            self.commander_selected.emit("F456")
+            return 1
+
+        monkeypatch.setattr(UseDiscoveredCommanderDialog, "exec", emit_then_return)
+
+        dashboard._on_use_discovered(0)
+
+        assert len(worker_controller.sync_slots_calls) == 1
+        called_config, called_snapshots = worker_controller.sync_slots_calls[0]
+        assert called_config is config
+        assert called_snapshots is dashboard.binding_snapshots
     

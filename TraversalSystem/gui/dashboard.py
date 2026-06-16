@@ -737,6 +737,7 @@ class DashboardWidget(QWidget):
                 self.slot_widgets[slot_index].append_log(
                     f"Slot {slot_index} manually bound to window {window.handle}"
                 )
+                self.worker_controller.sync_slots(self.config, self.binding_snapshots)
             
             dialog.window_selected.connect(on_window_selected)
             dialog.exec()
@@ -781,6 +782,7 @@ class DashboardWidget(QWidget):
             self.slot_widgets[slot_index].append_log(
                 f"Slot {slot_index} bound to discovered commander {fid}"
             )
+            self.worker_controller.sync_slots(self.config, self.binding_snapshots)
         
         dialog.commander_selected.connect(on_commander_selected)
         dialog.exec()

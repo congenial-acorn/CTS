@@ -132,7 +132,7 @@ class CTSMainWindow(QMainWindow):
         )
         
         # Initialize worker controller
-        self.worker_controller = WorkerController()
+        self.worker_controller = WorkerController(router=self.router)
         
         # Sync slots with worker controller
         # We call classify_all first to get binding snapshots and populate discovered_commanders
@@ -143,7 +143,7 @@ class CTSMainWindow(QMainWindow):
         """Periodically refresh discovery and bindings."""
         if hasattr(self, 'dashboard') and self.dashboard:
             self.dashboard.refresh_bindings()
-            snapshots = self.binding_controller.classify_all(self.config)
+            snapshots = self.dashboard.binding_snapshots
             self.worker_controller.sync_slots(self.config, snapshots)
 
     def _on_tab_changed(self, index: int) -> None:
