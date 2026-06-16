@@ -808,3 +808,43 @@ def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Pat
 
     queue.submit_restock.assert_not_called()
 
+
+def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    clock = _ManualClock(start=1000.0)
+    options = _make_options(tmp_path)
+    journal = MagicMock()
+    journal.reset_cancel.return_value = None
+    journal.jump_cancelled.return_value = False
+    journal.has_jumped.return_value = False
+    departure = datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc)
+    queue = object()
+    runtime_context = _make_runtime_context(
+        options=options,
+        sequence_queue=queue,
+        journal=journal,
+        slot_id=0,
+        sleep=lambda _seconds: None,
+    )
+    runtime_context.cancel_event.wait = (  # type: ignore[assignment]
+        lambda timeout=None: clock.advance(float(timeout or 0.0)) or False
+    )
+
+    def fake_run_coordinated_jump_plot(**_kwargs: object) -> tuple[int, datetime.datetime]:
+        return 6, departure
+
+    with patch("builtins.print"), \
+         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+         patch.object(main, "Reshandler", _FakeResHandler), \
+         patch.object(main, "load_route_list", return_value=["Sol"]), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+         patch.object(main, "consume_save", return_value=None), \
+         patch.object(main, "save_progress"), \
+         patch.object(main.time, "monotonic", side_effect=clock.now), \
+         patch.object(main.time, "sleep", side_effect=clock.advance), \
+         patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
+         patch.object(main, "_run_coordinated_restock"), \
+         patch.object(main, "JOURNAL_CONFIRMATION_TIMEOUT_SECONDS", 5.0):
+        result = main._run_traversal_slot(runtime_context)
+
+    assert result is False

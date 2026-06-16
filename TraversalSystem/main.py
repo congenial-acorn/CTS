@@ -998,6 +998,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 if total_time == 300:
                     print("\nPausing execution until jump is confirmed...")
                     completed = False
+                    confirmation_started_at = time.monotonic()
                     while not completed:
                         runtime_context.transition("waiting")
                         runtime_context.raise_if_cancelled()
@@ -1005,6 +1006,17 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                             return _handle_jump_cancelled(system, revert_index=True)
                         completed = journal.has_jumped()
                         if not completed:
+                            if (
+                                time.monotonic() - confirmation_started_at
+                                >= JOURNAL_CONFIRMATION_TIMEOUT_SECONDS
+                            ):
+                                print(
+                                    "\nJump confirmation timed out. "
+                                    "The carrier may be stuck. Saving progress and stopping slot."
+                                )
+                                return _handle_jump_cancelled(
+                                    system, revert_index=True
+                                )
                             print("Jump not complete...")
                             runtime_context.wait(10)
                     assert cooldown_deadline is not None
