@@ -192,15 +192,15 @@ class TestStartupReadinessWithoutJumpRequest:
 
         router = MultiJournalRouter()
         facade = CTSJournalFacade(router, "F-READY")
-        scan_loop = JournalScanLoop(router, tmp_path)
+        scan_loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         scan_loop.start()
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while facade.state() is None:
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             st = facade.state()
             assert st is not None
@@ -227,13 +227,13 @@ class TestScanLoopUpdatesSelectedCommanderState:
 
         router = MultiJournalRouter()
         facade = CTSJournalFacade(router, "F-TARGET")
-        scan_loop = JournalScanLoop(router, tmp_path)
+        scan_loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         # Start the scan loop — it polls every 1 second.
         scan_loop.start()
         try:
             # Give the loop time to process initial content.
-            time.sleep(1.5)
+            time.sleep(0.1)
             assert facade.last_carrier_request() is None
 
             # Append a CarrierJumpRequest for the target commander.
@@ -246,11 +246,11 @@ class TestScanLoopUpdatesSelectedCommanderState:
             ])
 
             # Wait for the scan loop to pick up the new event.
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while facade.last_carrier_request() is None:
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             assert facade.last_carrier_request() == "Sol"
             assert facade.departure_time() == "2026-04-25T12:15:00Z"
@@ -317,7 +317,7 @@ class TestJournalScanLoopLifecycle:
 
     def test_start_and_stop(self, tmp_path: Path) -> None:
         router = MultiJournalRouter()
-        loop = JournalScanLoop(router, tmp_path)
+        loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         loop.start()
         thread = getattr(loop, "_thread")
@@ -330,7 +330,7 @@ class TestJournalScanLoopLifecycle:
 
     def test_stop_idempotent(self, tmp_path: Path) -> None:
         router = MultiJournalRouter()
-        loop = JournalScanLoop(router, tmp_path)
+        loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         loop.start()
         loop.stop()
@@ -346,29 +346,19 @@ class TestJournalScanLoopLifecycle:
         ])
 
         router = MultiJournalRouter()
-        loop = JournalScanLoop(router, tmp_path)
+        loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         loop.start()
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while "F-BG" not in router.commanders:
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             assert "F-BG" in router.commanders
         finally:
             loop.stop()
-
-
-def test_scan_loop_updates_selected_commander_state(tmp_path: Path) -> None:
-    TestScanLoopUpdatesSelectedCommanderState().test_scan_loop_updates_selected_commander_state(tmp_path)
-
-
-def test_lost_window_invalidates_binding_and_blocks_automation(
-    tmp_path: Path,
-) -> None:
-    TestLostWindowInvalidatesBinding().test_lost_window_invalidates_binding_and_blocks_automation(tmp_path)
 
 
 class TestSequenceCancellationAwareWaits:
@@ -438,15 +428,15 @@ class TestJumpFlowUsesSelectedCommanderOnly:
         router = MultiJournalRouter()
         target_facade = CTSJournalFacade(router, "F-TARGET")
         other_facade = CTSJournalFacade(router, "F-OTHER")
-        scan_loop = JournalScanLoop(router, tmp_path)
+        scan_loop = JournalScanLoop(router, tmp_path, poll_interval=0.02)
 
         scan_loop.start()
         try:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while target_facade.state() is None or other_facade.state() is None:
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             assert target_facade.state() is not None
             assert other_facade.state() is not None
@@ -459,11 +449,11 @@ class TestJumpFlowUsesSelectedCommanderOnly:
                 ),
             ])
 
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while other_facade.last_carrier_request() != "Deciat":
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             assert other_facade.last_carrier_request() == "Deciat"
             assert target_facade.last_carrier_request() is None
@@ -477,11 +467,11 @@ class TestJumpFlowUsesSelectedCommanderOnly:
                 ),
             ])
 
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 3
             while target_facade.last_carrier_request() != "Sol":
                 if time.monotonic() > deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
 
             assert target_facade.last_carrier_request() == "Sol"
             assert target_facade.departure_time() == "2026-04-25T12:30:00Z"
@@ -490,7 +480,7 @@ class TestJumpFlowUsesSelectedCommanderOnly:
             _write_lines(other_journal, [
                 _evt("CarrierJump"),
             ])
-            time.sleep(1.5)
+            time.sleep(0.1)
 
             assert other_facade.has_jumped() is True
             assert target_facade.has_jumped() is False
@@ -564,16 +554,6 @@ class TestJumpCancelledClearsOnlyTargetCommanderPendingState:
 
         assert facade_a.has_jumped() is False
         assert facade_b.has_jumped() is False
-
-
-def test_jump_flow_uses_selected_commander_only(tmp_path: Path) -> None:
-    TestJumpFlowUsesSelectedCommanderOnly().test_jump_flow_uses_selected_commander_only(tmp_path)
-
-
-def test_jump_cancelled_clears_only_target_commander_pending_state(
-    tmp_path: Path,
-) -> None:
-    TestJumpCancelledClearsOnlyTargetCommanderPendingState().test_jump_cancelled_clears_only_target_commander_pending_state(tmp_path)
 
 
 class _FakeSequenceQueue:
@@ -956,10 +936,6 @@ class TestFocusFailureBlocksInputDispatch:
         assert input_dispatched is False
 
 
-def test_focus_failure_blocks_input_dispatch() -> None:
-    TestFocusFailureBlocksInputDispatch().test_focus_failure_blocks_input_dispatch()
-
-
 # ---------------------------------------------------------------------------
 # Fail-closed regression: unresolved binding blocks automation
 # ---------------------------------------------------------------------------
@@ -1058,22 +1034,6 @@ class TestUnresolvedBindingBlocksAutomation:
         # which prevents blind input from being dispatched.
         with pytest.raises(TypeError):
             _ = FocusGuard(cast(WindowBinding, cast(object, binding)), 5.0)
-
-
-def test_no_windows_means_no_binding() -> None:
-    TestUnresolvedBindingBlocksAutomation().test_no_windows_means_no_binding()
-
-
-def test_ambiguous_windows_means_no_binding() -> None:
-    TestUnresolvedBindingBlocksAutomation().test_ambiguous_windows_means_no_binding()
-
-
-def test_lost_window_yields_none_on_resolve() -> None:
-    TestUnresolvedBindingBlocksAutomation().test_lost_window_yields_none_on_resolve()
-
-
-def test_none_binding_means_no_focus_guard() -> None:
-    TestUnresolvedBindingBlocksAutomation().test_none_binding_means_no_focus_guard()
 
 
 # ---------------------------------------------------------------------------
@@ -1747,44 +1707,6 @@ class TestTwoCarrierSerializationIntegration:
 
 # Module-level wrappers for plan-required node IDs
 
-def test_two_carriers_serialize_jump_and_restock_through_queue(
-    tmp_path: Path,
-) -> None:
-    TestTwoCarrierSerializationIntegration().test_two_carriers_serialize_jump_and_restock_through_queue(tmp_path)
-
-
-def test_per_window_input_routing_via_injected_focus_handler(
-    tmp_path: Path,
-) -> None:
-    TestTwoCarrierSerializationIntegration().test_per_window_input_routing_via_injected_focus_handler(tmp_path)
-
-
-def test_per_slot_save_isolation_under_concurrent_writes(
-    tmp_path: Path,
-) -> None:
-    TestTwoCarrierSerializationIntegration().test_per_slot_save_isolation_under_concurrent_writes(tmp_path)
-
-
-def test_cancellation_cleans_up_deadline_and_restock() -> None:
-    TestTwoCarrierSerializationIntegration().test_cancellation_cleans_up_deadline_and_restock()
-
-
-def test_no_global_input_handler_called_in_gui_path() -> None:
-    TestTwoCarrierSerializationIntegration().test_no_global_input_handler_called_in_gui_path()
-
-
-def test_failure_in_one_slot_releases_queue_for_other() -> None:
-    TestTwoCarrierSerializationIntegration().test_failure_in_one_slot_releases_queue_for_other()
-
-
-def test_deadline_gating_defers_restock_until_after_jump() -> None:
-    TestTwoCarrierSerializationIntegration().test_deadline_gating_defers_restock_until_after_jump()
-
-
-def test_two_slots_independent_progress_tracking() -> None:
-    TestTwoCarrierSerializationIntegration().test_two_slots_independent_progress_tracking()
-
-
 # ---------------------------------------------------------------------------
 # Task 4: Observable scan-loop exception handling
 # ---------------------------------------------------------------------------
@@ -1826,12 +1748,13 @@ class TestScanLoopExceptionHandling:
             tmp_path,
             error_callback=captured.append,
             fail_fast=False,
+        poll_interval=0.02,
         )
 
         loop.start()
         try:
             # Give the loop time to perform several scan attempts.
-            deadline = time.monotonic() + 4
+            deadline = time.monotonic() + 2
             while len(captured) < 3 and time.monotonic() < deadline:
                 time.sleep(0.1)
         finally:
@@ -1857,6 +1780,7 @@ class TestScanLoopExceptionHandling:
             tmp_path,
             error_callback=captured.append,
             fail_fast=True,
+        poll_interval=0.02,
         )
 
         thread = loop._thread  # noqa: SLF001 — intentional for test
@@ -1865,7 +1789,7 @@ class TestScanLoopExceptionHandling:
         assert thread is not None
 
         # Thread should exit promptly (within a few seconds).
-        thread.join(timeout=5)
+        thread.join(timeout=2)
         assert not thread.is_alive(), (
             "Scan-loop thread should have exited after first exception "
             "when fail_fast=True"
@@ -1888,12 +1812,13 @@ class TestScanLoopExceptionHandling:
                 router,
                 tmp_path,
                 fail_fast=True,
-            )
+            poll_interval=0.02,
+        )
 
             loop.start()
             thread = loop._thread  # type: ignore[assignment]  # noqa: SLF001
             assert thread is not None
-            thread.join(timeout=5)
+            thread.join(timeout=2)
 
         assert router.scan_count >= 1
         assert any("log-me" in record.message for record in caplog.records)
@@ -1914,6 +1839,7 @@ class TestScanLoopExceptionHandling:
             tmp_path,
             error_callback=lambda e: observed_errors.append(str(e)),
             fail_fast=False,
+        poll_interval=0.02,
         )
 
         loop.start()
@@ -2391,28 +2317,6 @@ class TestJumpCancellationHandling:
 
 # Module-level wrappers for Task 7 tests
 
-def test_cancellation_during_countdown_saves_without_increment(
-    tmp_path: Path,
-) -> None:
-    TestJumpCancellationHandling().test_cancellation_during_countdown_saves_without_increment(tmp_path)
-
-
-def test_cancellation_during_completion_wait_reverts_index(
-    tmp_path: Path,
-) -> None:
-    TestJumpCancellationHandling().test_cancellation_during_completion_wait_reverts_index(tmp_path)
-
-
-def test_deadline_cleared_once_on_cancellation_during_completion_wait(
-    tmp_path: Path,
-) -> None:
-    TestJumpCancellationHandling().test_deadline_cleared_once_on_cancellation_during_completion_wait(tmp_path)
-
-
-def test_no_deadlock_on_cancellation(tmp_path: Path) -> None:
-    TestJumpCancellationHandling().test_no_deadlock_on_cancellation(tmp_path)
-
-
 # ---------------------------------------------------------------------------
 # Task 4 (plan task 4): Harden traversal countdown waits
 #
@@ -2564,14 +2468,6 @@ class TestCountdownHardening:
         assert 2.0 in time_sleep_calls, (
             "Discord rate-limiting sleeps should still use time.sleep(2)"
         )
-
-
-def test_short_jump_countdown_clamps_to_zero(tmp_path: Path) -> None:
-    TestCountdownHardening().test_short_jump_countdown_clamps_to_zero(tmp_path)
-
-
-def test_countdown_uses_cancel_aware_runtime_waits(tmp_path: Path) -> None:
-    TestCountdownHardening().test_countdown_uses_cancel_aware_runtime_waits(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2767,13 +2663,3 @@ class TestJumpsLeftResumeDisplay:
         )
 
 
-def test_resume_from_position_3_reports_correct_remaining_count(
-    tmp_path: Path,
-) -> None:
-    TestJumpsLeftResumeDisplay().test_resume_from_position_3_reports_correct_remaining_count(tmp_path)
-
-
-def test_skipped_entries_do_not_decrement_active_remaining(
-    tmp_path: Path,
-) -> None:
-    TestJumpsLeftResumeDisplay().test_skipped_entries_do_not_decrement_active_remaining(tmp_path)

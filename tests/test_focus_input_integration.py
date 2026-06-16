@@ -38,6 +38,17 @@ from TraversalSystem.runtime.controller import (
 )
 from TraversalSystem.config import TraversalOptions
 
+from collections.abc import Generator
+
+
+@pytest.fixture(autouse=True)
+def _patch_time_sleep() -> Generator[None, None, None]:
+    """Eliminate real time.sleep delays caused by slight_random_time() in
+    production traversal helpers.  The delay is still computed (preserving
+    call-order semantics) but never actually slept."""
+    with patch("time.sleep", lambda *a, **kw: None):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -661,7 +672,8 @@ class TestDependencyInjectionChain:
              patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
              patch.object(main, "jump_to_system", side_effect=_capture_jump), \
              patch.object(main, "SAVE_PATH", tmp_path / "missing-save.txt"), \
-             patch.object(main.tzlocal, "get_localzone", return_value=datetime.timezone.utc):
+             patch.object(main.tzlocal, "get_localzone", return_value=datetime.timezone.utc), \
+             patch.object(TraversalRuntimeContext, "wait", lambda self, *a, **kw: None):
             assert main._run_traversal_slot(context) is False
 
         assert captured_focus == [handler]
@@ -796,18 +808,3 @@ def test_traversal_seam_restock_uses_injected_not_global(tmp_path: Path) -> None
             focus_handler=handler,  # type: ignore[call-arg]
         )
     assert len(backend.calls) >= 1
-
-
-def test_injected_handler_unaffected_by_global_monkeypatch() -> None:
-    """Module-level wrapper: injected handler works despite global monkeypatch."""
-    TestGlobalInputHandlerMonkeypatch().test_injected_handler_unaffected_by_global_monkeypatch()
-
-
-def test_runtime_dependencies_hold_focus() -> None:
-    """Module-level wrapper: runtime deps store focus handler."""
-    TestDependencyInjectionChain().test_runtime_dependencies_hold_focus()
-
-
-def test_full_injection_chain_propagates_focus() -> None:
-    """Module-level wrapper: full chain propagates focus dependency."""
-    TestGapDocumentation().test_full_injection_chain_propagates_focus()
