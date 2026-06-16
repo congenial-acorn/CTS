@@ -880,3 +880,52 @@ def test_stale_deadline_pruning_prevents_indefinite_restock_starvation() -> None
         assert can_start_restock(estimated_duration=60.0) is True
     finally:
         _shutdown_queue(queue)
+
+
+def test_stale_pending_jump_deadline_does_not_block_restock() -> None:
+    clock = _ManualClock(start=0.0)
+    queue, _cancelled_error = _make_queue(clock)
+    active_started = threading.Event()
+    release_active = threading.Event()
+
+    can_start_restock = getattr(queue, "can_start_restock", None)
+    if not callable(can_start_restock):
+        pytest.fail("SequenceQueue must expose can_start_restock")
+
+    def active_block() -> str:
+        active_started.set()
+        assert release_active.wait(1.0)
+        return "active"
+
+    def pending_jump() -> str:
+        return "jump"
+
+    try:
+        _ = _submit_jump_plot(
+            queue,
+            slot_id="slot-active",
+            deadline=clock.now() + 1000.0,
+            estimated_duration=30.0,
+            run=active_block,
+        )
+        assert active_started.wait(1.0)
+
+        jump = _submit_jump_plot(
+            queue,
+            slot_id="slot-jump",
+            deadline=clock.now() + 10.0,
+            estimated_duration=30.0,
+            run=pending_jump,
+        )
+
+        assert can_start_restock(estimated_duration=60.0) is False
+
+        clock.advance(15.0)
+
+        assert can_start_restock(estimated_duration=60.0) is True
+
+        release_active.set()
+        assert jump.done.wait(1.0)
+    finally:
+        release_active.set()
+        _shutdown_queue(queue)

@@ -237,7 +237,7 @@ class SequenceQueue:
                     self._active = block
                     return block
 
-                _ = self._condition.wait(timeout=0.05)
+                _ = self._condition.wait(timeout=1.0)
 
     def _prune_cancelled_pending_locked(self) -> None:
         survivors: list[_PendingBlock[object]] = []
@@ -281,10 +281,13 @@ class SequenceQueue:
 
     def _earliest_jump_deadline_locked(self) -> float | None:
         self._prune_stale_registered_deadlines_locked()
+        now = self._time_fn()
         deadlines = [
             block.handle.deadline
             for block in self._pending
-            if block.kind == "jump_plot" and block.handle.deadline is not None
+            if block.kind == "jump_plot"
+            and block.handle.deadline is not None
+            and block.handle.deadline > now
         ]
         deadlines.extend(self._registered_jump_deadlines.values())
         if not deadlines:
