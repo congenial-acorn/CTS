@@ -237,11 +237,27 @@ class WorkerController(QObject):
         self._records = next_records
 
     def start_slot(self, slot_index: int) -> bool:
+        """Start a single slot's worker (per-slot Start button).
+
+        Unlike ``start_all_ready``, this path does NOT arm the first-cycle
+        ordering barrier: strict slot-index jump ordering across a batch is only
+        well-defined when the full set of starting slots is known up front, which
+        a single manual click is not. Per-slot starts therefore dispatch in
+        submission (click) order, which is the operator's explicit choice; use
+        "Start All" for strict slot-index ordering (Bug D). We do clear any stale
+        shared first-cycle base left by a prior batch so each manual start
+        captures a fresh base and ordering stays deterministic by construction.
+        """
         record = self._records[slot_index]
         if record.thread is not None:
             return False
         if record.state_machine.state is not WorkerState.READY:
             return False
+
+        queue = self.peek_shared_sequence_queue()
+        reset_base = getattr(queue, "reset_first_cycle_base", None)
+        if callable(reset_base):
+            reset_base()
 
         try:
             request = self._build_request(record)
