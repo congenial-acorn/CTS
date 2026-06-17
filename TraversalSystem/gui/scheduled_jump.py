@@ -93,7 +93,13 @@ class ScheduledJumpController(QObject):
         button_y: int,
         binding: object,
     ) -> None:
-        """Schedule a jump at *target_utc* (UTC time-of-day)."""
+        """Schedule a jump at *target_utc* (UTC time-of-day).
+
+        *target_utc* is a time-of-day, not a full datetime. If it has already
+        passed today it rolls forward to the same time tomorrow — consistent
+        with ``_build_target_datetime`` used by the per-tick countdown (Bug E).
+        This lets an operator schedule "for tomorrow morning" in the evening.
+        """
         self.cancel()  # clear any existing schedule
 
         now = self._time_provider()
@@ -101,7 +107,8 @@ class ScheduledJumpController(QObject):
             now.date(), target_utc, tzinfo=datetime.timezone.utc
         )
         if target_dt <= now:
-            raise ValueError("Time is in the past")
+            # Time-of-day already elapsed today → schedule for tomorrow.
+            target_dt += datetime.timedelta(days=1)
 
         self._target_time = target_utc
         self._button_x = button_x

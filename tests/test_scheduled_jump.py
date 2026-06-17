@@ -95,22 +95,27 @@ class TestScheduledJumpController:
         assert controller.is_scheduled is True
         assert "scheduled" in status
 
-    # -- 2. schedule() with past time raises ValueError -----------------------
+    # -- 2. schedule() with an elapsed time-of-day rolls to tomorrow ----------
 
-    def test_schedule_with_past_time_rejected(self, qapp):
+    def test_schedule_with_past_time_rolls_to_tomorrow(self, qapp):
+        # A time-of-day earlier than "now" must schedule for the same time
+        # tomorrow (consistent with _build_target_datetime), not raise (Bug E).
         now = _utc(2026, 1, 1, 12, 0, 0)
         controller = ScheduledJumpController(
             time_provider=lambda: now,
             parent=qapp,
         )
 
-        with pytest.raises(ValueError, match="Time is in the past"):
-            controller.schedule(
-                target_utc=_utc_time(11, 0, 0),  # 1 hour in the past
-                button_x=100,
-                button_y=200,
-                binding=Mock(),
-            )
+        controller.schedule(
+            target_utc=_utc_time(11, 0, 0),  # 1 hour earlier today
+            button_x=100,
+            button_y=200,
+            binding=Mock(),
+        )
+
+        assert controller.is_scheduled is True
+        # 11:00 tomorrow is 23h from 12:00 today.
+        assert controller.remaining_seconds == pytest.approx(23 * 3600, abs=2)
 
     # -- 3. countdown_updated emits formatted strings -------------------------
 
