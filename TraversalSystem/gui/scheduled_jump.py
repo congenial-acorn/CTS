@@ -157,12 +157,14 @@ class ScheduledJumpController(QObject):
             self._focus_attempted = True
             focus = self._resolve_focus_func()
             try:
-                focus(self._binding)
+                with _input_handler.dispatch_lock:
+                    focus(self._binding)
             except Exception:
                 # Retry once after a short sleep
                 try:
                     self._sleep_func(1.0)
-                    focus(self._binding)
+                    with _input_handler.dispatch_lock:
+                        focus(self._binding)
                 except Exception:
                     self._cleanup()
                     self.status_changed.emit("failed")
@@ -206,8 +208,12 @@ class ScheduledJumpController(QObject):
         focus = self._resolve_focus_func()
 
         def run() -> None:
-            focus(binding)
-            self._click_func(button_x, button_y)
+            # Hold the process-wide dispatch lock across focus + click so the
+            # scheduled click cannot interleave with a worker's focus-then-input
+            # critical section (Bug G).
+            with _input_handler.dispatch_lock:
+                focus(binding)
+                self._click_func(button_x, button_y)
 
         return run
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 # pyright: reportMissingImports=false, reportMissingModuleSource=false
 
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -19,11 +20,24 @@ IS_WINDOWS = sys.platform == "win32"
 # current foreground/global input state. That means
 # ``FocusAwareInputHandler.ensure_focus()`` plus the subsequent keypress/click is
 # not atomic across concurrent workers: another worker can steal focus after the
-# focus check returns but before the input lands. ``FocusGuard`` narrows that
-# race by blocking until focus is re-acquired immediately before dispatch, but it
-# cannot eliminate the gap entirely. A future architectural fix would use
-# window-targeted primitives instead (for example ``SendInput``/``PostMessage``
-# with HWND on Windows or ``xdotool --window <wid>`` on X11).
+# focus check returns but before the input lands.
+#
+# ``dispatch_lock`` below closes that race for all dispatch routed through this
+# process: ``FocusAwareInputHandler`` holds it across ``ensure_focus()`` + the
+# primitive so the focus-then-act pair is atomic relative to every other
+# lock-holding dispatcher, and no two workers interleave input. It is a
+# re-entrant lock so a focus-gated primitive may call a raw primitive on the
+# same thread without deadlocking. ``FocusGuard`` remains the per-binding focus
+# acquirer; the lock serializes the critical section it guards.
+#
+# This serializes concurrent dispatch but is still not true window-targeted I/O:
+# a fully robust fix would use window-targeted primitives (``SendInput``/
+# ``PostMessage`` with HWND on Windows, ``xdotool --window <wid>`` on X11), which
+# is deferred because it would require migrating recorded screen-absolute
+# coordinates and is unverifiable for DirectInput games without hardware.
+dispatch_lock = threading.RLock()
+"""Process-wide re-entrant lock serializing focus-then-input critical sections
+across concurrent workers (see module comment above and FocusAwareInputHandler)."""
 
 if IS_WINDOWS:
     import pydirectinput

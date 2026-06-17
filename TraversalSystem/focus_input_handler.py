@@ -155,19 +155,30 @@ class FocusAwareInputHandler:
         """
         self._focus_checker.ensure_focus()
 
-    # -- input primitives (each gated by focus) ----------------------------
+    # -- gated dispatch ----------------------------------------------------
+
+    def _dispatch(self, fn: Callable[..., None], *args: object) -> None:
+        """Run ``ensure_focus()`` then *fn* under the process-wide dispatch lock.
+
+        Holding ``input_handler.dispatch_lock`` across both halves makes the
+        focus-then-input pair atomic relative to every other worker, so a
+        concurrent worker cannot steal focus in the gap and land input on the
+        wrong window (Bug G).
+        """
+        with _real_input_handler.dispatch_lock:
+            self._ensure_focus()
+            fn(*args)
+
+    # -- input primitives (each gated by focus, serialized by the lock) -----
 
     def press(self, key: str) -> None:
-        self._ensure_focus()
-        self._backend.press(key)
+        self._dispatch(self._backend.press, key)
 
     def keyDown(self, key: str) -> None:
-        self._ensure_focus()
-        self._backend.keyDown(key)
+        self._dispatch(self._backend.keyDown, key)
 
     def keyUp(self, key: str) -> None:
-        self._ensure_focus()
-        self._backend.keyUp(key)
+        self._dispatch(self._backend.keyUp, key)
 
     def click(
         self,
@@ -175,16 +186,13 @@ class FocusAwareInputHandler:
         y: Optional[int] = None,
         button: str = "left",
     ) -> None:
-        self._ensure_focus()
-        self._backend.click(x, y, button)
+        self._dispatch(self._backend.click, x, y, button)
 
     def moveTo(self, x: int, y: int) -> None:
-        self._ensure_focus()
-        self._backend.moveTo(x, y)
+        self._dispatch(self._backend.moveTo, x, y)
 
     def typewrite(self, text: str, interval: float = 0.0) -> None:
-        self._ensure_focus()
-        self._backend.typewrite(text, interval)
+        self._dispatch(self._backend.typewrite, text, interval)
 
     # -- sequence helper ---------------------------------------------------
 
