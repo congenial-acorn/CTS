@@ -652,8 +652,13 @@ class DashboardWidget(QWidget):
         submit_jump_plot = getattr(shared_queue, "submit_jump_plot", None)
         submit_func: Callable[[Callable[[], None], float, object], object] | None = None
         if callable(submit_jump_plot):
+            # Namespace the scheduled-jump submission key so it does NOT collide
+            # with the worker's own "slot-{idx}" key. The queue pops the
+            # registered cooldown deadline for the submitted slot_id on every
+            # jump submission; sharing the worker's key would delete the worker's
+            # cross-carrier non-overlap deadline (Bug B).
             submit_func = lambda run, deadline, cancel_event: submit_jump_plot(
-                slot_id=f"slot-{slot_index}",
+                slot_id=f"slot-{slot_index}-scheduled",
                 run=run,
                 deadline=deadline,
                 estimated_duration=SCHEDULED_JUMP_ESTIMATE_SECONDS,
