@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -840,37 +840,102 @@ def test_coordinated_restock_skips_on_queue_timeout(tmp_path: Path) -> None:
     main = _load_main_with_mocks(tmp_path)
     options = _make_options(tmp_path)
 
-    class _TimeoutHandle:
-        def __init__(self) -> None:
-            self.cancelled = False
+    # Inject runtime_context EXACTLY as production does (not None), so the
+    # restock cancel event is the worker's own cancel_event iff the (buggy)
+    # aliasing is present. This is the regression guard for Bug A: a queue
+    # timeout must skip the restock WITHOUT setting the worker's cancel event.
+    runtime_context = SimpleNamespace(cancel_event=threading.Event())
+    captured: dict[str, threading.Event] = {}
 
+    class _TimeoutHandle:
         def result(self, timeout: float | None = None) -> object:
-            _ = timeout
+            # Mimic a queue that never executes the block: consume the wait
+            # slice, then report a timeout so the wait budget is exhausted.
+            time.sleep(timeout or 0)
             raise QueueTimeoutError
 
-        def cancel(self) -> None:
-            self.cancelled = True
+        def cancel(self) -> None:  # pragma: no cover
+            raise AssertionError(
+                "handle.cancel() must not be used to skip a restock — it aliases "
+                "the queue's cancel event and would stop the whole slot (Bug A)."
+            )
 
-    handle = _TimeoutHandle()
+    def _submit_restock(
+        *, slot_id: str, run: Callable[[], object],
+        estimated_duration: float, cancel_event: threading.Event,
+    ) -> object:
+        captured["cancel_event"] = cancel_event
+        return _TimeoutHandle()
+
     queue = MagicMock()
-    queue.submit_restock.return_value = handle
+    queue.submit_restock.side_effect = _submit_restock
 
-    with patch("builtins.print") as print_mock, patch.object(main, "restock_tritium"):
+    with patch("builtins.print") as print_mock, \
+            patch.object(main, "restock_tritium"), \
+            patch.object(main, "RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS", 0.3):
         main._run_coordinated_restock(
             sequence_queue=queue,
             queue_slot_id="slot-0",
             cancel_event=threading.Event(),
-            runtime_context=None,
+            runtime_context=runtime_context,
             options=options,
             sequence_dir=tmp_path,
             focus_handler=None,
         )
 
-    assert handle.cancelled is True
+    # The worker's own cancel event must stay UNSET so the slot keeps running.
+    assert runtime_context.cancel_event.is_set() is False
+    # A DEDICATED restock event (not the worker event) was passed and cancelled.
+    assert captured["cancel_event"] is not runtime_context.cancel_event
+    assert captured["cancel_event"].is_set() is True
     queue.submit_restock.assert_called_once()
     printed = " ".join(str(call.args[0]) for call in print_mock.call_args_list)
     assert "deferred" in printed
     assert "timeout" in printed
+
+
+def test_coordinated_restock_stops_promptly_on_user_stop(tmp_path: Path) -> None:
+    """A genuine user Stop during a deferred restock wait is still honored:
+    the worker cancel event propagates one-way into the restock event and the
+    helper returns promptly (it does not block for the full queue timeout)."""
+    main = _load_main_with_mocks(tmp_path)
+    options = _make_options(tmp_path)
+
+    runtime_context = SimpleNamespace(cancel_event=threading.Event())
+    runtime_context.cancel_event.set()  # user pressed Stop
+    captured: dict[str, threading.Event] = {}
+
+    class _NeverHandle:
+        def result(self, timeout: float | None = None) -> object:
+            raise QueueTimeoutError
+
+    def _submit_restock(
+        *, slot_id: str, run: Callable[[], object],
+        estimated_duration: float, cancel_event: threading.Event,
+    ) -> object:
+        captured["cancel_event"] = cancel_event
+        return _NeverHandle()
+
+    queue = MagicMock()
+    queue.submit_restock.side_effect = _submit_restock
+
+    started = time.monotonic()
+    with patch.object(main, "restock_tritium"), \
+            patch.object(main, "RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS", 180.0):
+        main._run_coordinated_restock(
+            sequence_queue=queue,
+            queue_slot_id="slot-0",
+            cancel_event=threading.Event(),
+            runtime_context=runtime_context,
+            options=options,
+            sequence_dir=tmp_path,
+            focus_handler=None,
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0  # returned promptly, not after the 180s timeout
+    assert captured["cancel_event"].is_set() is True  # restock cancelled
+    assert captured["cancel_event"] is not runtime_context.cancel_event
 
 
 def test_first_cycle_deadline_is_deterministic_slot_order(tmp_path: Path) -> None:

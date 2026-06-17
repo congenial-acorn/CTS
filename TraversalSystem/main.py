@@ -9,7 +9,7 @@ import random
 import threading
 import time
 from collections.abc import Mapping
-from concurrent.futures import TimeoutError as QueueTimeoutError
+from concurrent.futures import CancelledError as QueueCancelledError, TimeoutError as QueueTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Protocol, Tuple, cast
@@ -676,9 +676,16 @@ def _run_coordinated_restock(
         )
         return
 
-    effective_cancel_event = (
+    # The restock block gets its OWN cancel event. It must never alias the
+    # worker's cancel_event: SubmissionHandle.cancel() (called on queue timeout
+    # or shutdown) sets the event it holds, so aliasing the worker event would
+    # turn a *deferred restock skip* into a *whole-slot stop* (Bug A). A genuine
+    # user Stop is still honored by polling the worker event in the wait loop
+    # below and propagating it one-way into the restock event.
+    worker_cancel_event = (
         runtime_context.cancel_event if runtime_context is not None else cancel_event
     )
+    restock_cancel_event = threading.Event()
 
     handle = cast(
         SubmissionHandleAdapter,
@@ -691,19 +698,37 @@ def _run_coordinated_restock(
                 runtime_context=runtime_context,
             ),
             estimated_duration=estimate_restock_duration(options.tritium_slot),
-            cancel_event=effective_cancel_event,
+            cancel_event=restock_cancel_event,
         ),
     )
-    try:
-        _ = handle.result(timeout=RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS)
-    except QueueTimeoutError:
-        print(
-            "Restock deferred: shared queue contention exceeded "
-            f"{RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS:.0f}s timeout. "
-            "Skipping restock this cycle; will retry on the next cooldown."
-        )
-        handle.cancel()
-        return
+
+    wait_deadline = time.monotonic() + RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS
+    while True:
+        if worker_cancel_event.is_set():
+            # Genuine user Stop: cancel only the deferred restock and return.
+            # The caller's next runtime wait raises TraversalStopped, stopping
+            # the slot cleanly — we must NOT stop it from here.
+            restock_cancel_event.set()
+            return
+        remaining = wait_deadline - time.monotonic()
+        if remaining <= 0:
+            print(
+                "Restock deferred: shared queue contention exceeded "
+                f"{RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS:.0f}s timeout. "
+                "Skipping restock this cycle; will retry on the next cooldown."
+            )
+            restock_cancel_event.set()  # cancels only this restock, not the slot
+            return
+        try:
+            # Short poll slices so a user Stop is observed promptly instead of
+            # blocking for the full queue-wait timeout.
+            _ = handle.result(timeout=min(remaining, 0.5))
+            return
+        except QueueTimeoutError:
+            continue
+        except QueueCancelledError:
+            # Block cancelled externally (e.g. queue shutdown); nothing to do.
+            return
 
 
 def handle_critical_error(
