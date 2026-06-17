@@ -1,9 +1,21 @@
 # Multicarrier Jump Action Handling — Bug Report
 
 **Codebase:** CTS — Carrier Traversal System (Elite Dangerous Fleet Carrier Auto-Plotter)
-**Audit date:** 2026-06-16
-**Scope:** Multicarrier jump sequencing, tritium refuel gating/timing, carrier-to-process binding, and cross-carrier coordination.
-**Method:** Static analysis of production source under `TraversalSystem/` cross-referenced against the intended-behavior contract and the existing test suite under `tests/`.
+**Audit date:** 2026-06-17
+**Scope:** Multicarrier jump sequencing, tritium refuel gating/timing, carrier-to-process binding, scheduled-jump integration, and cross-carrier coordination.
+**Method:** Fresh static analysis of current production source under `TraversalSystem/` (HEAD = `b194972`) cross-referenced against the intended-behavior contract and the test suite under `tests/`. This report supersedes the 2026-06-16 audit; the prior findings were re-verified against current code and most have been resolved by commit `b194972` ("fix(multicarrier): enforce deterministic jump ordering and harden restock scheduling").
+
+> **Independent hostile verification — 2026-06-17.** Every finding below was re-checked against the source line-by-line, and Bug A was reproduced with an executable harness. Verdicts: **A, C, D, E, G, H confirmed as written; B confirmed but scope narrowed; F partially refuted** (the stated root cause is incorrect and the claimed restock-trigger impact is unreachable). Per-bug verdicts are recorded inline under each heading and summarized in the verification table below.
+
+> **✅ Fixes applied — 2026-06-17 (all eight).** Full test suite green (581 passed), including a new Bug A regression guard that injects `runtime_context` exactly as production does and asserts the worker event stays unset.
+> - **A** — Restock now gets a **dedicated** cancel event; the wait loop polls the worker event to honor a real Stop one-way, so a queue timeout skips the restock without stopping the slot. (`main.py` `_run_coordinated_restock`)
+> - **B** — Scheduled-jump submissions are namespaced `slot-{idx}-scheduled`, so they no longer delete the worker's registered cooldown deadline. (`gui/dashboard.py`)
+> - **C** — Scheduled-jump deadline submitted as `time.monotonic() + SCHEDULED_JUMP_ESTIMATE_SECONDS`, so it gates concurrent restocks while remaining the earliest jump. (`gui/scheduled_jump.py`)
+> - **D** — Per-slot `start_slot` documented as submission-order and now clears any stale shared first-cycle base so manual starts stay deterministic; strict slot-order remains the "Start All" path. (`gui/worker_controller.py`)
+> - **E** — `schedule()` now rolls an elapsed time-of-day forward to tomorrow (consistent with `_build_target_datetime`) instead of raising. (`gui/scheduled_jump.py`; test updated)
+> - **F** — Cooldown Discord milestones and the restock trigger now latch on a "crossed this threshold" basis instead of exact-integer equality, so a post-restock recalibration jump cannot skip them. (`main.py`)
+> - **G** — Added a process-wide re-entrant `dispatch_lock`; `FocusAwareInputHandler` and the scheduled-jump click hold it across focus+dispatch, making the focus-then-act pair atomic across workers. True window-targeted I/O remains deferred (documented inline). (`input_handler.py`, `focus_input_handler.py`, `gui/scheduled_jump.py`)
+> - **H** — Timeout test rewritten to use the production `runtime_context`; added `test_coordinated_restock_stops_promptly_on_user_stop`. (`tests/test_multicarrier_jump_queue.py`)
 
 ---
 
@@ -15,293 +27,324 @@ Per the operator's description, the system should:
 2. **Per-carrier config** — The user adds a route for each carrier and can toggle per-carrier settings such as auto-fuel.
 3. **Refuel gating** — **Tritium refuel must be ignored when `auto_jump` is disabled** for that carrier.
 4. **Jump ordering** — When multicarriers are started, the **first carrier goes through the jump sequence, then the second, and so on**.
-5. **Refuel timing / non-overlap** — The refueling sequence takes place sometime after the jump, but **not when it would overlap with a planned jump sequence**. It is triggered **5 minutes after the jump time** to match the jump cooldown optimally.
+5. **Refuel timing / non-overlap** — The refueling sequence takes place sometime after the jump, but **not when it would overlap with a planned jump sequence**. It is triggered **5 minutes before the cooldown ends** ("5 min remaining" — see `main.py:69-70`) to maximize the post-restock buffer ahead of the next jump.
 
 ---
 
 ## Executive Summary
 
-The refuel-gating rule (#3) and the queue-level non-overlap rule (#5, partial) are implemented correctly and are covered by tests. However, several real bugs and design deviations exist:
+Commit `b194972` resolved six of the eight issues from the 2026-06-16 audit (old bugs 1, 2, 3, 5, 7, 8) and added a timeout for old bug 4. The remaining unfixed item is old bug 6 (global input singletons), which is now at least explicitly documented.
+
+However, **the restock-timeout fix introduced a new HIGH-severity regression**: the timeout handler aliases the worker's cancel event, so a deferred restock kills the entire carrier worker instead of being skipped. The test suite misses this because it injects a fresh `threading.Event()` instead of the production cancel event.
 
 | # | Bug | Severity | Status |
 |---|-----|----------|--------|
-| 1 | Scheduled jump bypasses the SequenceQueue entirely | **High** | Confirmed |
-| 2 | First-cycle carrier ordering is non-deterministic (not slot-index order) | **Medium** | Confirmed |
-| 3 | Restock `estimated_duration` excludes focus-acquisition time → can overrun jump deadlines | **Medium** | Confirmed |
-| 4 | `_run_coordinated_restock` blocks the worker with no timeout (liveness hazard) | **Medium** | Confirmed |
-| 5 | "5 minutes after the jump" timing is actually ~62 s after the jump (5 min *remaining*, not *elapsed*) | **Medium** | Needs clarification |
-| 6 | Global input singletons (`_keyboard`/`_mouse`) create a focus/dispatch race window | Low–Med | Confirmed (mitigated) |
-| 7 | Restock runs even on the final jump of the route | Low | Confirmed |
-| 8 | Hardcoded magic numbers (`362`, `300`) undocumented | Low | Confirmed |
+| **A** | **Restock queue-timeout cancels the entire worker (cancel_event aliasing)** | **High** | **New regression, untested** |
+| **B** | Scheduled-jump `slot_id` collides with worker `slot_id`, clearing the worker's registered cooldown deadline | ~~Medium~~ → Low–Med (verified, scope narrowed) | New |
+| **C** | Scheduled-jump deadline (`time.monotonic()`) does not gate restocks → click can be delayed by another carrier's (or its own) feasible restock | Medium (verified) | New |
+| **D** | Per-slot `Start` button does not arm the first-cycle ordering barrier → manual out-of-order starts dispatch in submission order, not slot order | Low (verified, edge case) | New (edge case) |
+| **E** | `schedule()` rejects times that have passed today, but `_build_target_datetime` rolls past times to tomorrow — inconsistent; cannot schedule for tomorrow's UTC time once today's slot has elapsed | Low (verified) | Pre-existing |
+| **F** | ~~Cooldown `total_time == <integer>` matchers skip milestones under `wait(1)` jitter~~ — **partially refuted**: counter is jitter-immune; only post-restock recalibration can skip a sub-300 Discord refresh; restock trigger is robust | ~~Low~~ → Cosmetic | Pre-existing |
+| **G** | Global input singletons (`_keyboard`/`_mouse` on Linux; `pydirectinput` state on Windows) — focus-then-dispatch is non-atomic across concurrent workers | Low–Med | Pre-existing (now documented at `input_handler.py:16-26`) |
+| **H** | `_run_coordinated_restock` timeout test (`test_coordinated_restock_skips_on_queue_timeout`) uses a fresh `threading.Event()` rather than the runtime's event — masks bug A | Low (test gap) | New |
 
 ---
 
-## Independent Hostile Verification (2026-06-16)
+## Independent verification verdicts (2026-06-17)
 
-A second, adversarial pass was performed against live source — reading each cited
-location in full rather than trusting the report — to confirm, refute, or re-scope
-every claim. All cited line numbers were checked and are accurate.
-
-**Verdict summary:**
-
-| # | Original verdict | Verification verdict | Adjustment |
-|---|------------------|----------------------|------------|
-| 1 | High / Confirmed | **Confirmed** — mechanism is real | Severity is **precondition-gated**: hazard only exists when a scheduled jump and live worker automation run at the same time. High *given* that overlap; otherwise dormant. |
-| 2 | Medium / Confirmed | **Confirmed** — fully reproduced from source | None. Threads are *spawned* in slot order but the ~10 s startup wait + OS scheduling erase the head start; queue sort keys are both submission-order-derived. |
-| 3 | Medium / Confirmed | **Confirmed in principle, magnitude overstated** | Direction is correct (focus/subprocess time is unmodeled). But "up to 5 s per call" is the *failure* timeout, and failure **raises `FocusError` (aborts the restock)** rather than silently overrunning. On Windows an already-foreground window returns in ~0 s. Real unmodeled cost is the **X11 per-input `xdotool --sync` subprocess** (tens of ms each), not seconds. Net: **Low–Medium**, materialises only under sustained cross-window focus contention. |
-| 4 | Medium / Confirmed | **Confirmed** — but "indefinite" is worst-case | The unbounded `handle.result()` is real. Starvation requires other carriers to *continuously* hold a jump deadline within ~est (30–60 s) of now; with 362 s cooldowns that is a recurring but bounded window per cycle, so realistically a **multi-cycle stall**, not literal infinity. The wired `cancel_event` still unblocks it on user stop. Medium is fair. |
-| 5 | Medium / Needs clarification | **Headline is wrong; downgrade to Low (docs/semantics)** | The "~62 s after the jump" figure ignores that `total_time == 300` **blocks on journal jump-confirmation** (`main.py:1002-1023`, up to 300 s). Actual restock fires at `T_jump + 62 s + confirmation_wait`, *not* a fixed 62 s. The report's own Impact paragraph misattributes the 62 s to the confirmation wait — but the 62 s of plain countdown elapses *before* that wait begins. The literal constant `300` = 5 min is almost certainly the intended "5 minutes (remaining on cooldown)". This is a **documentation/semantics** question, not a timing defect. |
-| 6 | Low–Med / Confirmed | **Confirmed** | Module-global `_keyboard`/`_mouse` (non-Windows) and the global `pydirectinput` state (Windows) both dispatch to the foreground window; focus-then-dispatch is non-atomic across concurrent workers. Mitigated by `FocusGuard`. Accurate. |
-| 7 | Low / Confirmed | **Confirmed** — minor wording correction | The `total_time == 300` block (incl. `_run_coordinated_restock`) is not guarded by `idx + 1 < len(route_list)`; only deadline re-registration is. Note the confirmation wait *should* run on the final jump (to confirm arrival) — only the restock call is unwanted. "Wasted tritium/cargo" is imprecise: restock *moves* tritium cargo→tank rather than destroying it; the real cost is ~30–60 s of automation + queue occupancy. |
-| 8 | Low / Confirmed | **Confirmed** | `362` (`main.py:980-981`), `300` (`:998`), `1320` (`:816`) are bare literals. Note some sibling constants *are* named (`RESTOCK_*`, `JOURNAL_CONFIRMATION_TIMEOUT_SECONDS`), so the inconsistency is real. Accurate. |
-
-**Net:** 6 of 8 claims confirmed as written (1, 2, 4, 6, 7, 8). Bug 3 is real but its
-impact is narrower than stated. Bug 5's underlying semantics question is legitimate but
-its headline quantification ("~62 s") is incorrect and it is really a docs issue. No
-claim was found to be wholly false, and no new high-severity issue was uncovered in the
-verified regions. Per-bug detail is appended to each section below as **Verification:**.
+| # | Verdict | Adjusted severity | Verifier note |
+|---|---------|-------------------|---------------|
+| **A** | **CONFIRMED** | High (unchanged) | Reproduced with a harness: in the production path (`runtime_context` not `None`) `effective_cancel_event` *is* the worker event; `handle.cancel()` on timeout sets it; the next `runtime_context.wait(1)` raises `TraversalStopped` → worker stops. Trace and line refs all check out. |
+| **B** | **CONFIRMED — scope narrowed** | Low–Med (was Med) | The `slot-{index}` collision and unconditional `pop()` (`sequence_queue.py:279`) are real, and worker + scheduled-jump keys do collide (`main.py:786` ↔ `dashboard.py:656`). But the deletion only bites when a scheduled jump *fires* while an auto-plot worker is mid-cooldown **on the same carrier** — a self-conflicting configuration (two jump clickers on one window). Real, but narrower than "Medium" implies. |
+| **C** | **CONFIRMED** | Med (unchanged) | `time.monotonic()` deadline (`scheduled_jump.py:142`) is excluded by the strict `> now` filter (`sequence_queue.py:385`); `_select_next_locked` returns a feasible restock ahead of a pending jump (`:369-373`). Even a *lone* scheduled jump is delayed if any restock is pending (no other deadline ⇒ restock always feasible). |
+| **D** | **CONFIRMED** | Low edge (unchanged) | `start_slot` (`worker_controller.py:239-311`) has no barrier-arming call; only `start_all_ready` arms it (`:325`). Manual non-index start = user-chosen order, and the documented "Start All" path is correct — genuinely an edge case. |
+| **E** | **CONFIRMED** | Low (unchanged) | `schedule()` rejects `<= now` same-day (`scheduled_jump.py:103`) while `_build_target_datetime` rolls forward a day (`:183`). Inconsistent as described. |
+| **F** | **PARTIALLY REFUTED** | Cosmetic (was Low) | The stated root cause is wrong — see the rewritten Bug F section. `total_time -= 1` is a pure counter decrement, independent of wall-clock/`wait` jitter, so it hits **every** integer on the linear descent; no milestone is skipped by GC/scheduling jitter. The only real skip source is the post-restock **recalibration** (`main.py:1086, 1104`), which can only skip the sub-300 Discord cases. The claimed restock-trigger miss is **unreachable**: `total_time` is unconditionally re-initialized to `362` at `main.py:1042`, so `== 300` is always hit before any recalibration, and no save-resume path enters the cooldown loop mid-count. |
+| **G** | **CONFIRMED** | Low–Med, documented (unchanged) | Hazard comment present verbatim at `input_handler.py:16-26`; singletons at `:36-37`. No behavioral change. |
+| **H** | **CONFIRMED** | Low test gap (unchanged) | Test is green (re-run); uses `runtime_context=None` + a fresh `threading.Event()` + a mock `_TimeoutHandle` whose `cancel()` only flips a local flag — it never wires the handle to a runtime, so the aliasing side effect of Bug A is never observed. |
 
 ---
 
-## Bug 1 — Scheduled jump bypasses the SequenceQueue (HIGH)
+## Status of prior audit (2026-06-16) findings
 
-**Location:** `TraversalSystem/gui/scheduled_jump.py:120-131`, `TraversalSystem/gui/dashboard.py:616-671`
+| Old # | Title | Current status | Evidence |
+|---|---|---|---|
+| 1 | Scheduled jump bypasses SequenceQueue | **FIXED** | `dashboard.py:651-663` now constructs a `submit_func` from `peek_shared_sequence_queue().submit_jump_plot`; `scheduled_jump.py:139-144` invokes it inside `_tick`. When no queue exists, the click fires directly (legacy behavior). |
+| 2 | First-cycle ordering non-deterministic | **FIXED** | `SequenceQueue.claim_first_cycle_deadline` / `arm_first_cycle_barrier` (`sequence_queue.py:173-245`), invoked by `WorkerController._arm_first_cycle_batch` (`worker_controller.py:325, 369-387`) and `main.py:_resolve_first_cycle_jump_deadline` (`main.py:102-128`). Tests: `test_first_cycle_deadline_is_deterministic_slot_order`, `test_first_cycle_deadline_orders_concurrent_workers_by_slot`, `test_first_cycle_barrier_holds_head_block_until_siblings_arrive`, `test_first_cycle_barrier_releases_on_timeout_when_sibling_missing`. |
+| 3 | Restock estimate excludes focus time | **FIXED** | `estimate_restock_duration` now adds `RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS * (RESTOCK_INPUTS_FIXED + RESTOCK_INPUTS_PER_SLOT * tritium_slot)` (`main.py:88-94`). Test: `test_estimate_restock_duration_includes_focus_overhead`. |
+| 4 | Unbounded restock wait | **PARTIALLY FIXED — introduced bug A** | `handle.result(timeout=RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS=180)` added (`main.py:697-706`), but `handle.cancel()` aliases `runtime_context.cancel_event` → kills the worker (see Bug A). |
+| 5 | Restock trigger timing semantics | **FIXED (docs)** | Named constant `RESTOCK_TRIGGER_REMAINING_SECONDS = 300` with docstring explicitly stating "5 min REMAIN… NOT 5 min elapsed" (`main.py:69-70`). Test: `test_timing_constants_are_documented_and_correct`. |
+| 6 | Global input singletons race | **NOT FIXED (documented)** | Comment block at `input_handler.py:16-26` now explicitly documents the hazard and names the architectural fix (`SendInput`/`PostMessage` HWND, `xdotool --window`). |
+| 7 | Restock runs on the final jump | **FIXED** | `_run_coordinated_restock` is now guarded by `if idx + 1 < len(route_list):` (`main.py:1091`). Test: `test_traversal_slot_skips_restock_on_final_route_element`. |
+| 8 | Undocumented magic numbers | **FIXED** | `CARRIER_COOLDOWN_SECONDS`, `RESTOCK_TRIGGER_REMAINING_SECONDS`, `ESTIMATED_CYCLE_SECONDS`, `JOURNAL_CONFIRMATION_TIMEOUT_SECONDS`, `RESTOCK_*`, `FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS`, `RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS` are all named with docstrings (`main.py:64-85`). |
 
-**Description.** The "Scheduled Jump" feature (per-slot UTC-timed auto-click) dispatches its click **directly through the global input handler**, completely ignoring the shared `SequenceQueue` that exists precisely to serialize jump-plot and restock input blocks across carriers.
+---
+
+## Bug A — Restock queue-timeout cancels the entire worker (HIGH)
+
+> **✅ Verified 2026-06-17 — CONFIRMED.** Reproduced with a standalone harness replicating the exact `effective_cancel_event = runtime_context.cancel_event` wiring (`main.py:679-681`) and `handle.cancel()` (`main.py:705`): after the `QueueTimeoutError` path the worker's own cancel event reads `is_set() == True`. The downstream halt is verified by inspection — `runtime_context.wait` calls `raise_if_cancelled` (`controller.py:135-157`), `TraversalController.run` catches `TraversalStopped` → `stopped` → returns `False` (`controller.py:199-201`). All eight trace steps and every line reference in this section check out against current source. Severity **High** is correct.
+
+**Location:** `TraversalSystem/main.py:679-706`, `TraversalSystem/sequence_queue.py:67-71`, `TraversalSystem/runtime/controller.py:135-157`
+
+**Description.** The 180 s timeout that "skips" a deferred restock actually signals cancellation on the **same** `threading.Event` the runtime uses to stop the whole slot. The event object is shared by reference, not copied.
+
+Trace (all in the same worker thread, same Event instance):
+
+1. `WorkerController._build_request` creates one `threading.Event()` per slot (`worker_controller.py:414`).
+2. `CarrierAutomationWorker.run` forwards it as `cancel_event=self._request.cancel_event` (`workers.py:71`).
+3. `run_traversal` → `TraversalController.run` stores it as `runtime_context.cancel_event` (`controller.py:123, 187`). Same object.
+4. `_run_coordinated_restock` computes `effective_cancel_event = runtime_context.cancel_event` (`main.py:679-681`) and passes it as `submit_restock(cancel_event=effective_cancel_event)` (`main.py:694`).
+5. The `SubmissionHandle` holds that exact event (`sequence_queue.py:269`).
+6. On timeout, the handler calls `handle.cancel()` (`main.py:705`), which does `self.cancel_event.set(); self._cancelled = True` (`sequence_queue.py:67-71`).
+7. `runtime_context.cancel_event` is now set. The next `runtime_context.wait(1)` in the cooldown loop (`main.py:1108`) calls `raise_if_cancelled()` internally (`controller.py:147-151`) and raises `TraversalStopped`.
+8. `TraversalController.run` catches `TraversalStopped`, transitions to `stopped`, returns `False` (`controller.py:199-201`). The worker reports "stopped" and the slot terminates.
+
+The docstring explicitly intends the opposite behavior:
 
 ```python
-# scheduled_jump.py — default click target is the GLOBAL input handler, not the queue
-self._click_func = click_func or (lambda x, y: _input_handler.click(x, y))  # line 45
-
-def _tick(self):
-    ...
-    if delta <= 0:
-        self._click_func(self._button_x, self._button_y)   # line 128 — fires raw
-        self._cleanup()
+# main.py:81-82
+RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS = 180.0
+"""… on timeout the restock is skipped for this cycle and retried next cooldown."""
 ```
 
-A `grep` of `scheduled_jump.py` for `submit_jump_plot | submit_restock | SequenceQueue | sequence_queue` returns **zero matches** — the queue contract is never engaged.
+**Impact.** Under sustained cross-carrier queue contention (3+ tightly cycling carriers), a deferred restock times out after 180 s and the entire carrier slot halts mid-route. The user sees "Slot N stopped" with no indication that the cause was a restock deferral. Route progress is saved (`maybe_save_progress()` in the `finally` block, `main.py:1148-1150`), but the carrier will not continue.
 
-**Impact.** When two or more carriers are running:
-- Carrier A's worker is mid-jump-plot or mid-restock, holding the queue block and (via `FocusGuard`) focus on window A.
-- Carrier B's scheduled-jump `QTimer` fires. It calls `FocusGuard(binding).ensure_focus()` (`scheduled_jump.py:138, 183`) to focus window B — **stealing focus from A** — then clicks.
-- Carrier A's in-flight input sequence is now being sent to the wrong window, or its `FocusGuard` re-acquires focus mid-sequence, corrupting both carriers' automation.
+This is a regression introduced by the well-intentioned fix for old bug 4. The old "unbounded wait" was replaced by a wait whose cancellation signal is the worker's kill switch.
 
-This directly violates contract rule #5 ("refueling must not overlap with a planned jump sequence") and the queue's serialization invariant ("at most one automation block active at any time" — `tests/test_multicarrier_integration.py:1249`).
+**Evidence.**
+- `main.py:694`: `cancel_event=effective_cancel_event` where `effective_cancel_event = runtime_context.cancel_event` (`:680`).
+- `sequence_queue.py:69`: `self.cancel_event.set()` inside `cancel()`.
+- `controller.py:147-151`: `runtime_context.wait` raises `TraversalStopped` when `cancel_event` is set.
+- The timeout path returns normally from `_run_coordinated_restock`, but the next `runtime_context.wait(1)` at `main.py:1108` is guaranteed to raise.
+- No code path in `runtime/controller.py` or `main.py` ever clears `cancel_event` once set.
 
-**Evidence.** `scheduled_jump.py` contains no queue references; `dashboard.py:_on_schedule_jump` constructs a `ScheduledJumpController` and calls `.schedule()` without any queue interaction.
+**Test gap (Bug H).** `tests/test_multicarrier_jump_queue.py:839-873` (`test_coordinated_restock_skips_on_queue_timeout`) is green but does not exercise the bug. It constructs `cancel_event=threading.Event()` (a *fresh* event, `:862`) and `runtime_context=None` (`:863`), so the handle's `cancel_event` is disconnected from any runtime. The assertion `assert handle.cancelled is True` passes without ever observing the side effect on a runtime.
 
-**Recommendation.** Route the scheduled-jump click through `SequenceQueue.submit_jump_plot` (with the slot's `cancel_event` and a real deadline), or at minimum acquire a shared queue token before focusing/clicking, so the scheduled jump cannot interleave with an active automation block.
-
-**Verification (CONFIRMED — precondition-gated).** `ScheduledJumpController` is constructed at `dashboard.py:648` with **no** `click_func` or `focus_func` injected, so it falls back to the global defaults: `lambda x, y: _input_handler.click(x, y)` (`scheduled_jump.py:44-46`) and `lambda binding: FocusGuard(binding).ensure_focus()` (`scheduled_jump.py:184`). The grep returns zero queue references, as reported. The focus steal is real: `_tick` calls `focus(self._binding)` at `:138` then `self._click_func(...)` at `:128`. **Caveat:** this is only hazardous when a scheduled jump and worker automation are *simultaneously* active — the scheduled jump is an independent manual feature requiring a configured button coordinate + UTC time. The "High" rating is correct *conditional on* that overlap; with no workers running, the scheduled click is harmless.
-
----
-
-## Bug 2 — First-cycle carrier ordering is non-deterministic (MEDIUM)
-
-**Location:** `TraversalSystem/gui/worker_controller.py:313-336` (`start_all_ready`), `TraversalSystem/main.py:846-863` (deadline assignment), `TraversalSystem/sequence_queue.py:256-280` (`_select_next_locked`)
-
-**Description.** Contract rule #4 requires "the first carrier goes through the jump sequence, then the second, and so on." The implementation does **not** guarantee slot-index ordering on the first jump cycle:
-
-1. `start_all_ready` spawns one `QThread` per ready slot in a tight loop (`worker_controller.py:316, 332`). All threads run concurrently.
-2. Each thread waits ~10 s (`main.py:769` then the 5..1 countdown `main.py:801-803`), then submits its first jump plot.
-3. For the **first** jump, `next_jump_plot_deadline` is `None` (`main.py:723`), so the submitted deadline falls back to `time.monotonic()` — i.e. "now" (`main.py:846-851`):
-   ```python
-   if options.auto_plot_jumps:
-       jump_plot_deadline = (
-           next_jump_plot_deadline
-           if next_jump_plot_deadline is not None
-           else time.monotonic()      # ← all carriers submit ~identical deadlines
-       )
-   ```
-4. `SequenceQueue._select_next_locked` orders jumps by `(deadline, sequence)` (`sequence_queue.py:260-263`). With deadlines essentially equal, the tie-breaker is `sequence`, which is assigned in **submission order** (`sequence_queue.py:197-201`).
-5. Submission order is determined by OS thread scheduling, which is **non-deterministic**.
-
-**Impact.** On the first cycle, any carrier may win the race to submit first and thus jump first. Because subsequent-cycle deadlines propagate from the first cycle (each carrier re-registers `now + remaining_cooldown` after its restock), the first-cycle order is **sticky** — whichever carrier won the first cycle tends to stay ahead. The operator's expectation that slot 0 jumps first, then slot 1, etc., is not enforced.
-
-**Caveat.** The existing test `test_concurrent_auto_jump_plot_serializes_queue_blocks` (`tests/test_multicarrier_jump_queue.py:505-595`) only proves *serialization* of the blocks; it rigs the order by starting thread 1, waiting for it to seize the queue, and only then starting thread 2. It does not (and cannot, given the design) assert slot-index ordering under a realistic concurrent `start_all_ready`.
-
-**Recommendation.** If slot-index ordering is required for the first cycle, either (a) seed the first-cycle deadline with a slot-index offset (e.g. `time.monotonic() + slot_index * small_epsilon`) so the `(deadline, sequence)` sort resolves to slot order, or (b) have `start_all_ready` submit a deterministic pre-batch ordering token to the queue before spawning workers.
-
-**Verification (CONFIRMED).** `start_all_ready` (`worker_controller.py:313-336`) iterates `sorted(self._records)` and calls `start_slot` in slot order, but each `start_slot` returns immediately after `thread.start()` (`:310`) — the workers then run concurrently. Each worker does `runtime_context.wait(5)` (`main.py:769`) plus a 5→1 countdown (`main.py:801-803`) ≈ 10 s before its first submission, so the microsecond-scale spawn ordering is fully washed out by the wait + OS scheduling. The first-cycle deadline falls back to `time.monotonic()` (`main.py:847-851`), and `_select_next_locked` sorts by `(deadline, sequence)` (`sequence_queue.py:260-263`) where `sequence` is assigned in submission order (`:197-201`) — both keys derive from whichever thread submits first. Non-determinism reproduced. The test caveat is accurate: `test_concurrent_auto_jump_plot_serializes_queue_blocks` rigs order by starting thread 1, waiting on `first_started`, *then* starting thread 2 (`test_multicarrier_jump_queue.py:567-574`); no test asserts slot-index ordering under a true concurrent start.
-
----
-
-## Bug 3 — Restock estimate ignores focus-acquisition time (MEDIUM)
-
-**Location:** `TraversalSystem/main.py:71-72` (`estimate_restock_duration`), `TraversalSystem/sequence_queue.py:317-324` (`_restock_is_feasible`), `TraversalSystem/focus_input_handler.py` (focus-per-input)
-
-**Description.** The feasibility check that gates whether a restock may run uses an estimated duration:
+**Recommendation.** Pass a **dedicated** event to `submit_restock` — one that is *not* `runtime_context.cancel_event`. The queue worker already propagates cancellation to the running block via the event (the `runtime_context.raise_if_cancelled()` calls inside `restock_tritium`/`follow_button_sequence`), but for a *deferred* (never-started) restock, only the handle needs to be cancelled, not the worker. Minimal fix:
 
 ```python
-# main.py:71
-RESTOCK_FIXED_OVERHEAD_SECONDS = 30.0
-RESTOCK_PER_SLOT_SECONDS = 0.6
-def estimate_restock_duration(tritium_slot: int) -> float:
-    return RESTOCK_FIXED_OVERHEAD_SECONDS + RESTOCK_PER_SLOT_SECONDS * tritium_slot
+# main.py, inside _run_coordinated_restock
+restock_cancel_event = threading.Event()
+# Chain user-initiated stop onto the restock event so a real Stop still aborts:
+def _propagate():
+    if runtime_context.cancel_event.wait(timeout=0):
+        restock_cancel_event.set()
+# (or wire via runtime_context.cancel_event as a one-way proxy)
 
-# sequence_queue.py:317 — gates restock execution
-def _restock_is_feasible(self, restock, jump_deadline):
-    if jump_deadline is None:
-        return True
-    return self._time_fn() + restock.handle.estimated_duration < jump_deadline
-```
-
-But the actual restock runs through `FocusAwareInputHandler`, which calls `FocusGuard.ensure_focus()` **before every primitive input** (`focus_input_handler.py`). Focus acquisition can take up to `focus_timeout_seconds` (default 5 s) per call, and a restock issues many inputs (the `restock_fc` / `open_cargo_transfer` / `restock_cargo` sequences plus per-slot navigation). None of this focus overhead is included in `estimated_duration`.
-
-**Impact.** The queue can deem a restock "feasible" (it fits before the earliest jump deadline by the estimate), begin executing it as an atomic block, and then the real elapsed time — inflated by repeated focus acquisition — **overruns the jump deadline it was supposed to avoid**. Once a block is running, the queue cannot preempt it (`sequence_queue.py:217` just calls `block.run()` and waits). The result is exactly the overlap contract rule #5 forbids: a planned jump sequence is delayed because an "infeasible" restock slipped through.
-
-This is exacerbated in multicarrier mode where focus contention between windows is likely.
-
-**Recommendation.** Either (a) inflate `estimate_restock_duration` with a per-input focus-time budget (e.g. `+ num_inputs * focus_timeout_seconds`), or (b) have the restock block periodically re-check feasibility / yield the queue if it detects it will overrun, so the queue can re-schedule.
-
-**Verification (CONFIRMED IN PRINCIPLE — magnitude overstated).** The estimate (`30 + 0.6 * tritium_slot`, `main.py:71-72`) genuinely models none of the focus/dispatch overhead, and `FocusAwareInputHandler` does call `_ensure_focus()` before every primitive (`focus_input_handler.py:160-187`). **However**, the report's "up to 5 s per call" is the worst-case *failure* path, and inspecting `_focus_window` shows two corrections: (1) on win32, an already-foreground window returns at `window_manager.py:511-512` in ~0 s, so the steady single-foreground case adds negligible time; (2) when focus genuinely cannot be acquired, `_focus_window_*` **raises `FocusError`** (`window_manager.py:531, 560`), which aborts the restock rather than silently overrunning the deadline. The real *unmodeled* cost is the **X11 path** (`window_manager.py:537-558`), which spawns `xdotool windowactivate --sync` **unconditionally** on every input (no already-active short-circuit) — tens of ms each, not seconds. So an overrun-without-abort requires sustained cross-window focus contention repeatedly succeeding just under the timeout. Real but narrow → effective severity **Low–Medium**.
-
----
-
-## Bug 4 — `_run_coordinated_restock` blocks the worker indefinitely with no timeout (MEDIUM)
-
-**Location:** `TraversalSystem/main.py:631-645`, called from `main.py:1030-1038`
-
-**Description.** When a carrier reaches the restock trigger point, it submits a restock block and blocks on the handle:
-
-```python
-# main.py:631
-handle = cast(SubmissionHandleAdapter, submit_restock(
+handle = submit_restock(
     slot_id=queue_slot_id,
     run=lambda: restock_tritium(...),
     estimated_duration=estimate_restock_duration(options.tritium_slot),
-    cancel_event=effective_cancel_event,
-))
-_ = handle.result()    # ← blocks with NO timeout
+    cancel_event=restock_cancel_event,   # ← not the runtime event
+)
+try:
+    _ = handle.result(timeout=RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS)
+except QueueTimeoutError:
+    print("Restock deferred …")
+    restock_cancel_event.set()           # only cancels this restock
+    return
 ```
 
-The queue will only execute this restock when `_restock_is_feasible` returns true, i.e. when `now + estimated_duration < earliest_jump_deadline`. If other carriers continuously register imminent jump deadlines (their cooldowns landing just inside this carrier's restock window), this restock can remain pending indefinitely.
-
-**Impact.** The carrier's worker thread is frozen inside the `if total_time == 300:` block (`main.py:998`). Its cooldown countdown loop is paused, no further jumps are plotted, no cancellation is checked except via the `cancel_event` wired into the submission, and Discord status goes stale. With 3+ tightly-cycling carriers this is a realistic liveness stall, not merely a theoretical one.
-
-The blocking nature is acknowledged by `test_restock_queue_submission_blocks_until_queue_completion` (`tests/test_multicarrier_integration.py:731-738`), but no upper bound is enforced.
-
-**Recommendation.** Bound the wait with `handle.result(timeout=...)` and on timeout either skip the restock for this cycle (logging a miss) or fall back to a direct (non-queued) restock if no other carrier is active.
-
-**Verification (CONFIRMED — "indefinite" is worst-case).** `handle.result()` at `main.py:645` passes no timeout, confirmed. The starvation mechanism is real but bounded in practice: `_restock_is_feasible` (`sequence_queue.py:317-324`) only defers when `now + estimated_duration >= earliest_jump_deadline`, and `_prune_stale_registered_deadlines_locked` (`:307-315`) drops deadlines `<= now`. With 362 s cooldowns, each competing carrier only blocks this restock during the ~30–60 s window when its deadline sits within `est` of now — so a realistic outcome is a **multi-cycle stall**, not literal infinity. Mitigating factor the report already notes: `effective_cancel_event` (`main.py:627-642`) is wired, so a user stop unblocks the wait via `_prune_cancelled_pending_locked` (`sequence_queue.py:242-249`). Medium severity stands.
+The fix must also add a regression test that injects `runtime_context.cancel_event` exactly as production does, and asserts the event is **not** set after the timeout fires.
 
 ---
 
-## Bug 5 — Restock trigger timing: "5 minutes after the jump" is actually ~62 s after (MEDIUM — needs clarification)
+## Bug B — Scheduled-jump `slot_id` collides with worker `slot_id` (MEDIUM)
 
-**Location:** `TraversalSystem/main.py:980-1042`
+> **✅ Verified 2026-06-17 — CONFIRMED, scope narrowed to Low–Med.** Confirmed: the scheduled-jump lambda submits under `slot_id=f"slot-{slot_index}"` (`dashboard.py:656`), the worker keys everything under `queue_slot_id = f"slot-{slot_id}"` (`main.py:786`), and `_submit` unconditionally does `self._registered_jump_deadlines.pop(slot_id, None)` for every jump submission (`sequence_queue.py:279`) — so a scheduled-jump fire deletes the worker's registered cooldown deadline. The schedule button and start button are both enabled in `READY` with no mutual gating (`dashboard.py:421-427` vs `:388-391`), confirming the described race is possible. **Caveat the report understates:** the worker only *registers* a deadline while it is RUNNING (cooldown loop), and the scheduled jump only submits when its countdown hits zero. So the collision requires a scheduled jump to fire *while an auto-plot worker is mid-cooldown on the very same carrier* — i.e. two independent jump clickers aimed at one game window, which is already a self-conflicting setup. The mechanism is real but the operational window is narrow; treat as Low–Med rather than Medium.
 
-**Description.** Contract rule #5 states refueling "is triggered 5 minutes after the jump time." The code triggers it at a different instant:
+**Location:** `TraversalSystem/gui/dashboard.py:651-661`, `TraversalSystem/sequence_queue.py:278-279`
+
+**Description.** The scheduled-jump integration uses `slot_id=f"slot-{slot_index}"` for its `submit_jump_plot` submission — the same key the worker uses for its own jump blocks and registered cooldown deadlines. The queue treats all jump blocks with the same `slot_id` as belonging to one slot, and `_submit` does:
 
 ```python
-print("Jumping!")                              # line 973  — jump departs NOW (T_jump)
-...
-total_time = 362                               # line 980  — cooldown counter starts at 362
-cooldown_deadline = time.monotonic() + 362.0   # line 981
-...
-while total_time > 0:                          # line 984  — counts DOWN: 362 → 0
-    ...
-    if total_time == 300:                      # line 998  — triggers when 300 REMAIN
-        ...
-        _run_coordinated_restock(...)          # line 1030
+# sequence_queue.py:278-279 (inside _submit, kind == "jump_plot")
+_ = self._registered_jump_deadlines.pop(slot_id, None)
 ```
 
-The counter decrements once per second, so `total_time == 300` is reached after `362 − 300 = 62` seconds. **The restock fires at `T_jump + 62 s`, not `T_jump + 300 s`.** The literal reading of contract rule #5 ("5 minutes after the jump time") expects `T_jump + 300 s`.
+So submitting a scheduled jump **deletes** whatever cooldown deadline the worker for that slot had registered via `register_jump_deadline` (`main.py:813-817`). Other carriers' restock feasibility checks no longer see this slot's pending jump, so a restock may be deemed "feasible" and overlap the slot's actual next jump.
 
-Two interpretations are possible, and they imply opposite verdicts:
+**Mitigations already in place.** The schedule button is gated to `WorkerState.READY` (`dashboard.py:421-427`), so this can only fire when the worker is not running. **However**, after scheduling, the slot remains `READY` and `start_btn` stays enabled (`dashboard.py:388-391`). A user who schedules a jump at 14:00 UTC and then clicks Start will have two submitters racing on the same `slot_id`, with the scheduled submission silently deleting the worker's registered cooldown deadline.
 
-| Interpretation | Expected trigger | Actual | Match? |
-|---|---|---|---|
-| "5 minutes *elapsed* since the jump" | `T_jump + 300 s` | `T_jump + 62 s` | **No — 238 s early** |
-| "5 minutes *remaining* in the cooldown" | cooldown value `== 300` | `total_time == 300` | Yes |
+**Impact.** Cross-carrier non-overlap (contract rule #5) is weakened for this slot. Other carriers may dispatch restocks into this slot's cooldown window because the gating deadline was deleted.
 
-The phrase "to match the jump cooldown optimally" leans toward the second reading (maximize the post-restock buffer before the next jump). But the literal wording "5 minutes after the jump time" matches the first.
+**Evidence.**
+- `dashboard.py:656`: `slot_id=f"slot-{slot_index}"` in the `submit_func` lambda.
+- `sequence_queue.py:279`: unconditional `pop(slot_id, None)` on every jump submission.
+- `main.py:816`: worker registers deadline under the same `f"slot-{slot_id}"` key.
+- `dashboard.py:421-427`: schedule button is enabled whenever state is `READY`, regardless of whether a schedule is already counting down.
 
-**Impact.** If the operator means literal `T_jump + 5 min`, then every restock is firing ~4 minutes too early, leaving the carrier sitting idle after refuel for the remainder of the cooldown — and, more importantly, the restock is occurring while the just-jumped carrier may still be loading into the new system (the jump-confirmation wait at `main.py:1001-1023` is what occupies those first ~62 s, so in practice the restock begins immediately after confirmation, which is reasonable). If the operator means "5 min remaining," the code is correct.
-
-**Recommendation.** Confirm the intended semantics. If literal elapsed-5-minutes is intended, change the trigger to a wall-clock check (`time.monotonic() - jump_departed_at >= 300`). If "5 min remaining" is intended, update the operator-facing docs/comment to say so explicitly, since "5 minutes after the jump time" currently misreads as elapsed time.
-
-**Verification (HEADLINE INCORRECT — downgrade to Low / docs-semantics).** The "~62 s after the jump" claim does not survive reading the actual block. At `total_time == 300` the worker does **not** immediately restock — it enters a blocking confirmation loop (`main.py:1002-1023`) that waits for `journal.has_jumped()`, polling every 10 s up to `JOURNAL_CONFIRMATION_TIMEOUT_SECONDS` (300 s), and only *after* confirmation runs `_run_coordinated_restock` (`:1030`). So the restock fires at **`T_jump + 62 s + confirmation_wait`**, a variable instant dominated by journal timing — not a fixed 62 s. The report's Impact paragraph is self-contradictory here: it claims the confirmation wait "occupies those first ~62 s," but the code shows 62 s of plain `wait(1)` countdown elapsing (362→300) *before* the confirmation loop begins. Substantively, the literal trigger constant is `300` = 5 minutes, which strongly implies the intended semantics is "trigger when 5 minutes remain on the cooldown," matching "to match the jump cooldown optimally." This is a **documentation/wording** question, not a timing defect — reduce to **Low**.
+**Recommendation.** Either (a) namespace the scheduled-jump `slot_id` (e.g. `f"slot-{slot_index}-scheduled"`) so it does not collide with worker keys, or (b) disable `start_btn` while a schedule is active for the same slot (mirror the `sj_schedule_btn` gating).
 
 ---
 
-## Bug 6 — Global input singletons create a focus/dispatch race window (LOW–MEDIUM)
+## Bug C — Scheduled-jump deadline does not gate restocks (MEDIUM)
 
-**Location:** `TraversalSystem/input_handler.py:22-23` (module-level singletons), `TraversalSystem/focus_input_handler.py` (per-input `ensure_focus` then dispatch)
+> **✅ Verified 2026-06-17 — CONFIRMED.** `_tick` submits the deadline as `time.monotonic()` (`scheduled_jump.py:140-144`); `_earliest_jump_deadline_locked` filters with strict `block.handle.deadline > now` (`sequence_queue.py:385`), so by evaluation time the deadline is in the past and excluded from the gating set; `_select_next_locked` returns a feasible restock ahead of the pending jump (`:369-373`). Note the jump block is still *dispatched* (it stays in the unfiltered `jumps` sort at `:350-353`) — only its *gating* is lost. Additional observation: because an absent gating deadline makes any restock feasible (`_restock_is_feasible` returns `True` when `jump_deadline is None`, `:417-418`), even a single scheduled jump with one pending restock is delayed; cross-carrier contention is not required. Severity **Medium** stands.
 
-**Description.** Per-slot binding is correctly scoped: each worker gets its own `FocusAwareInputHandler` wrapping its own `FocusGuard(binding)` (`worker_controller.py:373`, `focus_input_handler.py:96-188`), and `BindingController._runtime_bindings` is keyed by FID (`binding_controller.py:178`). However, the underlying dispatch layer is global:
+**Location:** `TraversalSystem/gui/scheduled_jump.py:142`, `TraversalSystem/sequence_queue.py:377-390, 369-375`
+
+**Description.** When the scheduled-jump fires through the queue, the deadline it submits is `time.monotonic()` — i.e. "now" (`scheduled_jump.py:142`). The earliest-jump-deadline computation that gates restock feasibility uses a strict `> now` filter:
 
 ```python
-# input_handler.py:22-23 — shared across ALL workers
-_keyboard = KeyboardController()
-_mouse = MouseController()
+# sequence_queue.py:380-386
+deadlines = [
+    block.handle.deadline
+    for block in self._pending
+    if block.kind == "jump_plot"
+       and block.handle.deadline is not None
+       and block.handle.deadline > now    # ← strictly greater
+]
 ```
 
-Every `FocusAwareInputHandler.press()/click()/...` does `ensure_focus()` (which focuses *this* slot's window) and then dispatches through these **shared** global controllers, which target *whatever window is currently foreground*.
+By the time the queue worker evaluates, microseconds have elapsed, so the scheduled jump's deadline is in the past and is **excluded** from the gating set. Consequently `_restock_is_feasible` does not see it, and any other carrier's restock that is feasible against *future* jump deadlines may run first. `_select_next_locked` always prefers a feasible restock over an earliest jump (`sequence_queue.py:369-375`).
 
-**Impact.** Between a worker's `ensure_focus()` returning and its `_keyboard.press(...)` executing, another worker's `ensure_focus()` can re-steal focus to a different window. The first worker's keypress then lands on the wrong carrier's client. The blocking nature of `FocusGuard.ensure_focus()` (it loops until its window is foreground) makes this window narrow and rare in practice, but it is **not atomic** — the contract "carrier A's inputs go to carrier A's window" is not structurally guaranteed under concurrent workers.
+**Impact.** A scheduled jump set for 14:00:00 UTC can be delayed by up to one restock duration (~30–180 s, depending on `tritium_slot` and queue contention) if another carrier has a feasible restock pending. For Elite Dangerous carrier jumps — which the user is presumably timing to a specific game window — a 1–3 minute click delay may miss the intended jump slot.
 
-This is the same class of hazard as Bug 1, but inherent to the input layer rather than the scheduled-jump feature.
+The contract says restocking "must not overlap with a planned jump sequence." A scheduled jump set for "right now" is the most-planned jump of all, yet it is the one jump whose deadline does not gate restocks.
 
-**Recommendation.** For hard isolation, dispatch inputs via window-targeted primitives (e.g. `SendInput`/`PostMessage` with HWND on Windows, `xdotool --window` on X11) instead of foreground-directed global controllers. At minimum, document the focus-guard-based mitigation as the only line of defense.
+**Evidence.**
+- `scheduled_jump.py:142`: `self._submit_func(self._make_fire_block(), time.monotonic(), self._cancel_event)`.
+- `sequence_queue.py:385`: `block.handle.deadline > now`.
+- `sequence_queue.py:369-375`: feasible restock wins over earliest jump.
 
-**Verification (CONFIRMED — mitigated).** `_keyboard = KeyboardController()` / `_mouse = MouseController()` are module-level singletons on non-Windows (`input_handler.py:22-23`); on Windows the equivalent global state lives in the imported `pydirectinput` module (`:14-17`). Both dispatch to whatever window is foreground, so the `ensure_focus()` → dispatch pair in `FocusAwareInputHandler` is not atomic across concurrent workers. Same hazard class as Bug 1, inherent to the input layer. FocusGuard's blocking re-acquire narrows but does not close the window. Rating accurate.
-
----
-
-## Bug 7 — Restock runs on the final jump of the route (LOW)
-
-**Location:** `TraversalSystem/main.py:998-1042`
-
-**Description.** The restock trigger at `total_time == 300` is inside the per-system loop and is not guarded by `idx + 1 < len(route_list)`. Only the *deadline re-registration* afterwards is so guarded (`main.py:1041`). Consequently, after the carrier's **last** jump, the full tritium restock sequence still executes, refueling a carrier that is about to declare "Route complete!" and (optionally) shut the system down (`main.py:1053-1072`).
-
-**Impact.** Wasted tritium/cargo and ~30–60 s of unnecessary automation (plus queue occupancy that delays other carriers) right before route completion. Not harmful, but contrary to expectation.
-
-**Recommendation.** Guard the restock with `if idx + 1 < len(route_list):` (skip on the final iteration), or gate it on whether a subsequent jump is actually planned.
-
-**Verification (CONFIRMED — wording correction).** The `if total_time == 300:` block (`main.py:998`), which contains `_run_coordinated_restock` (`:1030`), is not guarded by `idx + 1 < len(route_list)`; only the initial and re-registration of the next deadline are (`:982`, `:1041`). So on the final route element the worker still confirms the jump and then restocks. Two refinements to the writeup: (1) the **confirmation wait itself should** run on the final jump — it verifies arrival before "Route complete!"; only the restock call is unwanted, so a fix must guard `_run_coordinated_restock`, not the whole block. (2) "Wasted tritium/cargo" is imprecise — a restock *transfers* tritium cargo→fuel tank rather than consuming it; the genuine cost is the ~30–60 s of automation and queue occupancy ahead of route completion. Low severity stands.
+**Recommendation.** Submit the scheduled-jump deadline as `time.monotonic() + SCHEDULED_JUMP_ESTIMATE_SECONDS` (5 s) instead of `time.monotonic()`. That keeps it first in the jump sort (still earliest) while making it strictly `> now` so it participates in the restock feasibility gate. Alternatively, special-case "deadline ≤ now" jumps in `_earliest_jump_deadline_locked` to count them as gating deadlines with value `now`.
 
 ---
 
-## Bug 8 — Undocumented magic numbers in the cooldown/restock timing (LOW)
+## Bug D — Per-slot `Start` does not arm the first-cycle ordering barrier (LOW–MEDIUM)
 
-**Location:** `TraversalSystem/main.py:980` (`total_time = 362`), `main.py:998` (`if total_time == 300:`), `main.py:816` (`seconds=1320`)
+> **✅ Verified 2026-06-17 — CONFIRMED (Low edge case).** `_arm_first_cycle_batch` is called only from `start_all_ready` (`worker_controller.py:325`); `start_slot` (`:239-311`) contains no barrier-arming call, and `_first_cycle_satisfied` defaults to `True` (`sequence_queue.py:103`) so jump blocks dispatch on arrival. The worked example holds. Worth stating plainly: a user manually starting slots in non-index order is *explicitly choosing* that order, and the documented multicarrier entry point ("Start All") is unaffected — so this is closer to "manual override behaves as manually ordered" than a contract violation. Low is the right altitude.
 
-**Description.** The cooldown is hardcoded to `362` seconds (6 min 2 s) and the restock trigger to `300` seconds (5 min remaining). The arrival-time estimator adds `1320` seconds (22 min) per jump. None of these are named constants or documented:
+**Location:** `TraversalSystem/gui/worker_controller.py:313-346, 369-387, 239-311`
 
-- Why `362` rather than `360` (a clean 6 min)? Presumably a buffer, but it is silent.
-- Why `300` for the restock trigger? (See Bug 5.)
-- The `match total_time:` Discord-update cases at `340, 320, 151, 100, 90, ...` (`main.py:949-967, 988-996`) are equally opaque.
+**Description.** `_arm_first_cycle_batch` is invoked exclusively from `start_all_ready` (`worker_controller.py:325`). The per-slot path `_on_start_slot` (`dashboard.py:695-698`) → `start_slot` (`worker_controller.py:239-311`) never arms the barrier.
 
-**Impact.** If Elite Dangerous's actual carrier-jump cooldown changes, or differs from the author's assumption, these silent constants will produce wrong timing with no obvious place to fix. They also make Bug 5 harder to reason about.
+Without the barrier, the queue dispatches whichever jump block arrives first while the queue is idle. `claim_first_cycle_deadline` still produces slot-ordered deadlines (`base + slot_index * 0.001`), but if only one block is pending at dispatch time the sort is moot — that block runs immediately regardless of its deadline.
 
-**Recommendation.** Extract named constants (`CARRIER_COOLDOWN_SECONDS`, `RESTOCK_TRIGGER_REMAINING_SECONDS`, `ESTIMATED_CYCLE_SECONDS`) with docstrings citing the game mechanic they model.
+Worked example: the user clicks Start on slot 1, then Start on slot 0. Slot 1's worker claims its deadline (`base + 0.001`), submits, and — queue idle — dispatches instantly. Slot 0's worker claims `base + 0.000` and submits a moment later, but slot 1 is already running. Slot 1 jumps first, slot 0 second. Contract rule #4 is violated.
 
-**Verification (CONFIRMED).** `total_time = 362` (`main.py:980`), `cooldown_deadline = time.monotonic() + 362.0` (`:981`), `if total_time == 300:` (`:998`), and `seconds=1320` (`:816`) are all bare literals with no naming or comment. The inconsistency is notable because sibling constants *are* named at the top of the module (`RESTOCK_FIXED_OVERHEAD_SECONDS`, `RESTOCK_PER_SLOT_SECONDS`, `JOURNAL_CONFIRMATION_TIMEOUT_SECONDS`, `main.py:64-68`) — so the pattern exists; these three just weren't extracted. The opaque Discord `match total_time:` cases (`:949-967`, `:988-996`) are likewise undocumented. Accurate, Low.
+**Impact.** Edge case. The "Start All" path — the documented multicarrier entry point — is unaffected (it arms the barrier). The bug only manifests when a user manually starts slots in non-index order via the per-slot buttons, and only on the first jump cycle (subsequent cycles are pinned by registered cooldown deadlines).
+
+**Evidence.**
+- `worker_controller.py:313-346`: `start_all_ready` is the only caller of `_arm_first_cycle_batch`.
+- `worker_controller.py:239-311`: `start_slot` contains no barrier-arming call.
+- `dashboard.py:695-698`: `_on_start_slot` calls `start_slot` directly.
+- `sequence_queue.py:103`: `_first_cycle_satisfied` defaults to `True`, so the barrier is open by default and jump blocks dispatch on arrival.
+
+**Recommendation.** If strict slot-index ordering is required regardless of entry point, lift `_arm_first_cycle_batch` into `start_slot` (counting currently-`READY` siblings). If the contract only covers the batch path, document the per-slot behavior as "submission order" and gate `start_btn` while siblings are still `READY` to make the ordering deterministic by construction.
+
+---
+
+## Bug E — Scheduled-jump time rollover is inconsistent (LOW)
+
+> **✅ Verified 2026-06-17 — CONFIRMED.** `schedule()` rejects any same-day `target_dt <= now` (`scheduled_jump.py:100-104`) while `_build_target_datetime` rolls a past time forward by a day (`:180-184`). The inconsistency and the "can't schedule for tomorrow" UX consequence are exactly as described. Low.
+
+**Location:** `TraversalSystem/gui/scheduled_jump.py:99-104, 174-185`
+
+**Description.** `schedule()` refuses any target whose combined datetime is `<= now`:
+
+```python
+# scheduled_jump.py:100-104
+target_dt = datetime.datetime.combine(now.date(), target_utc, tzinfo=datetime.timezone.utc)
+if target_dt <= now:
+    raise ValueError("Time is in the past")
+```
+
+But the per-tick helper `_build_target_datetime` rolls past times forward by a day:
+
+```python
+# scheduled_jump.py:180-184
+target = datetime.datetime.combine(now.date(), self._target_time, tzinfo=datetime.timezone.utc)
+if target < now:
+    target += datetime.timedelta(days=1)
+```
+
+The two are inconsistent. If the user wants to schedule for 14:00 UTC tomorrow and the local "now" is 15:00 UTC today, `schedule()` raises "Time is in the past" — even though `_build_target_datetime` would have happily computed tomorrow's 14:00 UTC. The only way to schedule "tomorrow" is to wait until midnight UTC and then schedule for a time later in the day.
+
+**Impact.** Minor UX surprise. Users attempting to schedule a jump more than ~24h in advance, or schedule "for tomorrow morning" in the evening, will see an unhelpful "Time is in the past" error.
+
+**Recommendation.** Either (a) have `schedule()` use `_build_target_datetime` and only reject if the rolled-forward time is still `<= now` (impossible unless `target_utc` equals `now`'s time-of-day to the second), or (b) explicitly accept a `target_date` parameter and document the 24h-only window.
+
+---
+
+## Bug F — Integer-equality milestones on a drifting countdown (COSMETIC — partially refuted)
+
+> **⚠️ Verified 2026-06-17 — PARTIALLY REFUTED. The original root cause is wrong and the claimed functional restock-trigger impact is unreachable.** The section has been rewritten below to reflect what the code actually does. Net residual issue: at most a single skipped *Discord embed field refresh* on the sub-300 cases after a slow restock. Downgraded from Low to Cosmetic.
+
+**Location:** `TraversalSystem/main.py:1002-1031, 1046-1109`
+
+**What the report got wrong.** The original claim was that `runtime_context.wait(1)` jitter (GC pressure, signal delivery, scheduling skew) can make `total_time` "skip a milestone." This is **incorrect.** `total_time` is a pure software counter: it is initialized and then mutated only by `total_time -= 1` (`main.py:1031, 1109`) and by the two explicit recalibrations after a restock (`:1086, 1104`). It is **not** derived from wall-clock time inside the loop, so no amount of `wait()` jitter can make it skip an integer on the linear descent — it visits **every** value from its start down to 0. The `match`/`==` matchers therefore fire reliably on the linear portion of both loops regardless of timing jitter. The cited `controller.py:139-157` "not wall-clock-accurate" property is real but irrelevant to whether `total_time` skips values.
+
+**What is actually true (the residual, much smaller issue).** The only way `total_time` skips an integer is the post-restock recalibration:
+- `total_time = max(0, int(cooldown_deadline - time.monotonic()))` (`:1086`), and
+- `total_time = max(0, total_time - int(restock_elapsed))` (`:1104`).
+
+Both execute **after** the `total_time == 300` restock trigger has already fired (they live inside the `if total_time == RESTOCK_TRIGGER_REMAINING_SECONDS:` block, `:1061`). After they run, `total_time` can jump downward by several seconds, which can step *over* a sub-300 Discord milestone case (`case 151`, `case 100` in the cooldown loop, `:1056-1059`). That — and only that — is the genuine defect: one skipped Discord embed refresh after a slow restock+confirmation. Purely cosmetic.
+
+**Why the claimed restock-trigger miss is unreachable.** The report hedged that `total_time == 300` could be skipped "if the worker resumes from a save file directly into the cooldown phase." It cannot: the cooldown loop **unconditionally** sets `total_time = CARRIER_COOLDOWN_SECONDS` (362) at `main.py:1042` immediately before the `while` (`:1046`). There is no code path that enters that loop with any other starting value, and resume re-enters the per-route loop from the top (re-initializing `total_time`), so `300` is always hit on the linear descent before any recalibration. The restock trigger is robust.
+
+**Evidence.**
+- `main.py:1031, 1109`: `total_time -= 1` is the only in-loop counter mutation — deterministic, jitter-immune.
+- `main.py:1042`: `total_time = CARRIER_COOLDOWN_SECONDS` unconditionally precedes the cooldown `while` at `:1046`; no mid-loop entry exists.
+- `main.py:1061`: `== 300` trigger is reached before the recalibrations at `:1086, 1104`, which sit *inside* its block.
+- `main.py:1056-1059`: sub-300 Discord cases are the only matchers a post-restock jump can step over.
+
+**Recommendation (unchanged in spirit, scope reduced).** If the cosmetic Discord skip matters, drive the sub-300 milestone updates off `cooldown_deadline - time.monotonic()` ranges (or a "highest-milestone-not-yet-emitted" latch) rather than exact-integer `match` cases. The restock trigger needs no change.
+
+---
+
+## Bug G — Global input singletons (LOW–MEDIUM, documented)
+
+> **✅ Verified 2026-06-17 — CONFIRMED (documented, no behavioral change).** The hazard comment is present verbatim at `input_handler.py:16-26`, the `_keyboard`/`_mouse` singletons at `:36-37`, and it correctly names the architectural fix (`SendInput`/`PostMessage` HWND, `xdotool --window`). `FocusGuard` narrows but does not close the focus-then-dispatch race. Accurate as written.
+
+**Location:** `TraversalSystem/input_handler.py:16-37, 93-134`, `TraversalSystem/focus_input_handler.py:149-187`
+
+**Description.** Same hazard class as the 2026-06-16 audit. `_keyboard = KeyboardController()` and `_mouse = MouseController()` (`input_handler.py:36-37`, Linux/macOS) and the module-level `pydirectinput` state on Windows both dispatch to whatever window is currently foreground. `FocusAwareInputHandler`'s `ensure_focus()` → `_backend.press(...)` pair is therefore not atomic across concurrent workers: another worker can steal focus in the gap. `FocusGuard` narrows but cannot close the window.
+
+**Status.** The hazard is now explicitly documented in `input_handler.py:16-26`, including the architectural fix (window-targeted primitives: `SendInput`/`PostMessage` with HWND on Windows, `xdotool --window <wid>` on X11). No behavioral change.
+
+**Impact.** Under concurrent multicarrier operation with focus contention, an input may land on the wrong carrier's window. `FocusGuard`'s blocking re-acquire makes this rare in practice but not impossible.
+
+**Recommendation.** Unchanged from the prior audit: migrate dispatch to window-targeted primitives. Until then, the `FocusGuard` mitigation is the only line of defense and should be called out in operator-facing docs.
 
 ---
 
 ## What is wired up correctly
 
-For completeness, the following parts of contract rules #1–#5 **are** correctly implemented and (where applicable) tested:
+For completeness, the following parts of contract rules #1–#5 **are** correctly implemented in the current source and (where applicable) tested:
 
-- **Thumbnail binding (rule #1):** `ManualBindDialog` (`dashboard.py:72-233`) captures per-window thumbnails via `_CaptureWorker`, emits the selected `WindowInfo`, and `BindingController.manual_bind` (`binding_controller.py:414-491`) stores it in `_runtime_bindings[fid]` (in-memory only, fail-closed). Auto-binding (`classify_slot`) and the FID-not-discovered safety guard (`binding_controller.py:475-480`) are correct.
-- **Per-carrier toggles (rule #2):** `CarrierSlotConfig` (`gui_config.py:71-121`) carries independent `auto_plot_jumps`, `disable_refuel`, `route_file`, `tritium_slot`, `refuel_mode` per slot, all editable in `SlotEditorWidget` (`slot_editor.py`) and flowed into `TraversalOptions` per worker (`worker_controller.py:544-564`).
-- **Refuel ignored when auto_jump disabled (rule #3):** The guard exists in **both** the direct path and the queue path, and is unit-tested:
-  - `restock_tritium`: `if not options.auto_plot_jumps or options.disable_refuel: return` (`main.py:298`)
-  - `_run_coordinated_restock`: `if options.disable_refuel or not options.auto_plot_jumps: return` (`main.py:606`)
-  - Test: `test_coordinated_restock_skipped_when_auto_plot_jumps_disabled` (`tests/test_multicarrier_jump_queue.py:792-809`) asserts `submit_restock` is not called.
-- **Queue-level non-overlap (rule #5, partial):** `SequenceQueue._restock_is_feasible` (`sequence_queue.py:317-324`) correctly checks `now + estimated_duration < earliest_jump_deadline`, and `_select_next_locked` (`sequence_queue.py:256-280`) defers a restock when the pending jump deadline is too soon. This is verified by `test_future_jump_deadline_allows_restock_to_run_before_pending_jump` and `test_soon_jump_deadline_defers_restock_until_after_pending_jump` (`tests/test_multicarrier_jump_queue.py:404-431`). *Caveat: see Bug 3 for why this check is leaky in practice.*
-- **Queue serialization invariant:** At most one block runs at a time (`sequence_queue.py:206-226`), confirmed by `test_two_carriers_serialize_jump_and_restock_through_queue` (`tests/test_multicarrier_integration.py:1148-1265`, asserts `max_active == 1`).
+- **Thumbnail binding (rule #1):** `ManualBindDialog` (`dashboard.py:75-235`) captures per-window thumbnails on a background `_CaptureWorker` thread, emits the selected `WindowInfo` via `window_selected`, and `_on_manual_bind` (`dashboard.py:726-762`) routes it through `BindingController.manual_bind` (`binding_controller.py:414-491`), which writes only to in-memory `_runtime_bindings[fid]` (fail-closed, never persisted). Auto-bind and the FID-not-discovered safety guard are correct (`binding_controller.py:295-348, 472-480`).
+- **Per-carrier toggles (rule #2):** `CarrierSlotConfig` carries independent `auto_plot_jumps`, `disable_refuel`, `route_file`, `tritium_slot`, `refuel_mode` per slot; these flow into `TraversalOptions` per worker via `WorkerController._build_options` (`worker_controller.py:577-597`).
+- **Refuel ignored when `auto_jump` disabled (rule #3):** Guarded in both paths and unit-tested.
+  - `restock_tritium`: `if not options.auto_plot_jumps or options.disable_refuel: return` (`main.py:350`).
+  - `_run_coordinated_restock`: `if options.disable_refuel or not options.auto_plot_jumps: return` (`main.py:658`).
+  - Test: `test_coordinated_restock_skipped_when_auto_plot_jumps_disabled` (`tests/test_multicarrier_jump_queue.py:819`).
+- **First-cycle jump ordering via the queue (rule #4, batch path):** `claim_first_cycle_deadline` + `arm_first_cycle_barrier` produce a deterministic `(deadline, sequence)` sort that resolves to slot-index order once all siblings have arrived. Tests: `test_first_cycle_deadline_is_deterministic_slot_order`, `test_first_cycle_deadline_orders_concurrent_workers_by_slot`, `test_first_cycle_barrier_holds_head_block_until_siblings_arrive`, `test_first_cycle_barrier_releases_on_timeout_when_sibling_missing`.
+- **Queue-level non-overlap (rule #5):** `SequenceQueue._restock_is_feasible` (`sequence_queue.py:412-419`) correctly checks `now + estimated_duration < earliest_jump_deadline`, and `_select_next_locked` defers a restock when the earliest pending jump deadline is too soon. Tests: `test_future_jump_deadline_allows_restock_to_run_before_pending_jump`, `test_soon_jump_deadline_defers_restock_until_after_pending_jump`. *Caveats: see Bug C for the scheduled-jump gap and Bug F for the integer-equality fragility.*
+- **Restock skipped on the final jump:** `if idx + 1 < len(route_list):` guards `_run_coordinated_restock` (`main.py:1091`). Test: `test_traversal_slot_skips_restock_on_final_route_element`.
+- **Restock estimate includes focus overhead:** `estimate_restock_duration` adds `RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS * focus_inputs` (`main.py:88-94`). Test: `test_estimate_restock_duration_includes_focus_overhead`.
+- **Jump confirmation timeout:** `JOURNAL_CONFIRMATION_TIMEOUT_SECONDS = 300` bounds the journal-confirmation wait inside the restock block (`main.py:1072-1082`); on timeout the slot saves progress and stops cleanly via `_handle_jump_cancelled`. Test: `test_journal_confirmation_timeout_stops_slot`.
+- **Scheduled-jump queue integration (when queue is present):** `dashboard.py:651-663` constructs `submit_func` from the shared queue; `scheduled_jump.py:139-144` invokes it. The click block runs inside the queue's serialization invariant.
+- **Queue serialization invariant:** At most one block runs at a time (`sequence_queue.py:295-314`). Confirmed by `test_two_carriers_serialize_jump_and_restock_through_queue`.
 
 ---
 
 ## Suggested fix priority
 
-1. **Bug 1** (scheduled jump queue bypass) — highest payoff, isolates a whole class of input conflicts.
-2. **Bug 3** (restock estimate vs. focus time) — closes the leak in the otherwise-correct non-overlap gate.
-3. **Bug 5** (restock trigger timing) — resolve the semantics question; one-line fix either way once confirmed.
-4. **Bug 2** (first-cycle ordering) — small deterministic-deadline tweak if slot-index order is required.
-5. **Bug 4** (unbounded restock wait) — add a timeout fallback.
-6. **Bugs 6–8** — hardening, documentation, and cleanup.
+1. **Bug A** (restock timeout kills worker) — highest payoff and a real regression. Pass a dedicated cancel event to `submit_restock`; add a regression test that injects `runtime_context.cancel_event` exactly as production does and asserts the event is *not* set on timeout. **This also closes Bug H.**
+2. **Bug B** (scheduled-jump `slot_id` collision) — namespace the scheduled-jump submission key or disable `start_btn` while a schedule is active.
+3. **Bug C** (scheduled-jump deadline does not gate restocks) — submit the deadline as `time.monotonic() + SCHEDULED_JUMP_ESTIMATE_SECONDS`, or extend `_earliest_jump_deadline_locked` to count `<= now` jump deadlines as `now`.
+4. **Bug D** (per-slot Start skips the barrier) — lift `_arm_first_cycle_batch` into `start_slot`, or document the per-slot path as submission-order and gate `start_btn` while siblings are `READY`.
+5. **Bug G** (global input singletons) — architectural; migrate to window-targeted dispatch.
+6. **Bug E** — UX hardening; align `schedule()` with `_build_target_datetime`.
+7. **Bug F** — **cosmetic only after verification** (one possible skipped Discord field refresh after a slow restock; restock trigger is robust). Lowest priority; fold into a future cooldown-loop refactor if touched at all.
+
+---
+
+## Verification appendix (2026-06-17)
+
+- **Source basis:** `TraversalSystem/` at the working tree for HEAD `b194972`. Lines cited above were read directly.
+- **Bug A reproduction:** a standalone harness reproduced the exact wiring (`effective_cancel_event = runtime_context.cancel_event`; `submit_restock(cancel_event=…)`; `QueueTimeoutError` → `handle.cancel()`) and observed the worker's cancel event set to `True` after the timeout — confirming the regression.
+- **Bug H:** `tests/test_multicarrier_jump_queue.py::test_coordinated_restock_skips_on_queue_timeout` re-run and confirmed green; inspection confirms it injects `runtime_context=None` + a fresh `threading.Event()` + a mock handle, so it cannot observe Bug A.
+- **Net change vs. the analysis as filed:** A, C, D, E, G, H stand as written; **B** is confirmed but narrowed to Low–Med (requires a self-conflicting same-carrier scheduled-jump + auto-plot overlap); **F** is partially refuted — the stated jitter root cause is wrong and the restock-trigger impact is unreachable, leaving only a cosmetic Discord-refresh skip. No code was modified.
