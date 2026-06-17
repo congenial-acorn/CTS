@@ -1066,6 +1066,15 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             print("Counting down until next jump...")
             total_time = CARRIER_COOLDOWN_SECONDS
             cooldown_deadline = time.monotonic() + CARRIER_COOLDOWN_SECONDS
+            # Milestones and the restock trigger latch on a "crossed this
+            # threshold" basis (fire once when total_time first falls at/below
+            # the trigger), not on exact integer equality. The post-restock
+            # recalibration below can make total_time jump downward by several
+            # seconds; exact-equality matchers would silently skip any value
+            # stepped over (Bug F). Thresholds are listed in descending order.
+            cooldown_milestones = ((340, 6, 7), (320, 7, 7), (151, 8, 8), (100, 8, 9))
+            fired_milestones: set[int] = set()
+            restock_triggered = False
             if idx + 1 < len(route_list):
                 register_next_jump_deadline(total_time)
             while total_time > 0:
@@ -1073,17 +1082,13 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
                 # Discord embed progress milestones (cooldown countdown).
-                match total_time:
-                    case 340:
-                        discord_messenger.update_fields(6, 7)
-                    case 320:
-                        discord_messenger.update_fields(7, 7)
-                    case 151:
-                        discord_messenger.update_fields(8, 8)
-                    case 100:
-                        discord_messenger.update_fields(8, 9)
+                for trigger, current_field, total_field in cooldown_milestones:
+                    if total_time <= trigger and trigger not in fired_milestones:
+                        fired_milestones.add(trigger)
+                        discord_messenger.update_fields(current_field, total_field)
 
-                if total_time == RESTOCK_TRIGGER_REMAINING_SECONDS:
+                if not restock_triggered and total_time <= RESTOCK_TRIGGER_REMAINING_SECONDS:
+                    restock_triggered = True
                     print("\nPausing execution until jump is confirmed...")
                     completed = False
                     confirmation_started_at = time.monotonic()
