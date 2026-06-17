@@ -25,7 +25,10 @@ from TraversalSystem.gui.worker_state import WorkerState
 from TraversalSystem.window_capture import capture_window, create_placeholder
 from TraversalSystem.window_manager import WindowInfo
 from TraversalSystem.gui.theme import ED_DARK_BG, ED_PANEL_BG, ED_ORANGE, ED_TEXT, ED_BORDER
-from TraversalSystem.gui.scheduled_jump import ScheduledJumpController
+from TraversalSystem.gui.scheduled_jump import (
+    SCHEDULED_JUMP_ESTIMATE_SECONDS,
+    ScheduledJumpController,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -645,7 +648,19 @@ class DashboardWidget(QWidget):
         if old:
             old.cancel()
 
-        controller = ScheduledJumpController(parent=self)
+        shared_queue = self.worker_controller.peek_shared_sequence_queue()
+        submit_jump_plot = getattr(shared_queue, "submit_jump_plot", None)
+        submit_func: Callable[[Callable[[], None], float, object], object] | None = None
+        if callable(submit_jump_plot):
+            submit_func = lambda run, deadline, cancel_event: submit_jump_plot(
+                slot_id=f"slot-{slot_index}",
+                run=run,
+                deadline=deadline,
+                estimated_duration=SCHEDULED_JUMP_ESTIMATE_SECONDS,
+                cancel_event=cancel_event,
+            )
+
+        controller = ScheduledJumpController(parent=self, submit_func=submit_func)
 
         widget = self.slot_widgets[slot_index]
         controller.countdown_updated.connect(widget.update_countdown)

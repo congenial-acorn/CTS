@@ -170,6 +170,9 @@ def worker_controller():
         def sync_slots(self, config, binding_snapshots):
             self.sync_slots_calls.append((config, binding_snapshots))
 
+        def peek_shared_sequence_queue(self):
+            return None
+
     mock_wc = MockWorkerController()
     return mock_wc
 

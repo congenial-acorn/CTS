@@ -730,10 +730,11 @@ def _run_restock_cycle(
 
 def test_restock_queue_submission_blocks_until_queue_completion(tmp_path: Path) -> None:
     queue, order = _run_restock_cycle(tmp_path)
+    expected_duration = 30.0 + 0.05 * 40
 
     assert queue.register_calls
     assert len(queue.submit_restock_calls) == 1
-    assert queue.submit_restock_calls[0][0:2] == ("slot-0", 30.0)
+    assert queue.submit_restock_calls[0][0:2] == ("slot-0", expected_duration)
     assert queue.submit_restock_calls[0][2] is not None
     assert order == ["jump-1", "queue-result", "restock", "jump-2"]
     assert queue.deadlines == {}
@@ -2661,5 +2662,4 @@ class TestJumpsLeftResumeDisplay:
             f"Jump' at idx=2 must show 'Jumps remaining: 3'. "
             f"Got '{jumps_remaining_field}'."
         )
-
 

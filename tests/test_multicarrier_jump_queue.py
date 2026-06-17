@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import importlib
+from concurrent.futures import TimeoutError as QueueTimeoutError
 import sys
 import threading
 import time
@@ -753,14 +754,35 @@ def test_cli_fallback_uses_direct_jump_to_system_without_queue(
 def test_estimate_restock_duration_scales_with_tritium_slot(tmp_path: Path) -> None:
     main = _load_main_with_mocks(tmp_path)
 
-    assert main.estimate_restock_duration(0) == main.RESTOCK_FIXED_OVERHEAD_SECONDS
-
     per_slot = main.RESTOCK_PER_SLOT_SECONDS
+    focus_overhead = main.RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS
+    fixed_inputs = main.RESTOCK_INPUTS_FIXED
+    inputs_per_slot = main.RESTOCK_INPUTS_PER_SLOT
+    assert main.estimate_restock_duration(0) == pytest.approx(
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS + focus_overhead * fixed_inputs
+    )
+
     assert main.estimate_restock_duration(100) == pytest.approx(
-        main.RESTOCK_FIXED_OVERHEAD_SECONDS + per_slot * 100
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS
+        + per_slot * 100
+        + focus_overhead * (fixed_inputs + inputs_per_slot * 100)
     )
     assert main.estimate_restock_duration(500) == pytest.approx(
-        main.RESTOCK_FIXED_OVERHEAD_SECONDS + per_slot * 500
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS
+        + per_slot * 500
+        + focus_overhead * (fixed_inputs + inputs_per_slot * 500)
+    )
+
+
+def test_estimate_restock_duration_includes_focus_overhead(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+
+    duration = main.estimate_restock_duration(0)
+
+    assert duration > main.RESTOCK_FIXED_OVERHEAD_SECONDS
+    assert duration == pytest.approx(
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS
+        + main.RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS * main.RESTOCK_INPUTS_FIXED
     )
 
 
@@ -784,7 +806,12 @@ def test_coordinated_restock_passes_dynamic_estimate_to_queue(tmp_path: Path) ->
 
     queue.submit_restock.assert_called_once()
     submitted_duration = queue.submit_restock.call_args.kwargs["estimated_duration"]
-    expected = main.RESTOCK_FIXED_OVERHEAD_SECONDS + main.RESTOCK_PER_SLOT_SECONDS * 200
+    expected = (
+        main.RESTOCK_FIXED_OVERHEAD_SECONDS
+        + main.RESTOCK_PER_SLOT_SECONDS * 200
+        + main.RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS
+        * (main.RESTOCK_INPUTS_FIXED + main.RESTOCK_INPUTS_PER_SLOT * 200)
+    )
     assert submitted_duration == pytest.approx(expected)
     assert submitted_duration != main.DEFAULT_RESTOCK_ESTIMATE_SECONDS
 
@@ -807,6 +834,235 @@ def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Pat
     )
 
     queue.submit_restock.assert_not_called()
+
+
+def test_coordinated_restock_skips_on_queue_timeout(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    options = _make_options(tmp_path)
+
+    class _TimeoutHandle:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def result(self, timeout: float | None = None) -> object:
+            _ = timeout
+            raise QueueTimeoutError
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    handle = _TimeoutHandle()
+    queue = MagicMock()
+    queue.submit_restock.return_value = handle
+
+    with patch("builtins.print") as print_mock, patch.object(main, "restock_tritium"):
+        main._run_coordinated_restock(
+            sequence_queue=queue,
+            queue_slot_id="slot-0",
+            cancel_event=threading.Event(),
+            runtime_context=None,
+            options=options,
+            sequence_dir=tmp_path,
+            focus_handler=None,
+        )
+
+    assert handle.cancelled is True
+    queue.submit_restock.assert_called_once()
+    printed = " ".join(str(call.args[0]) for call in print_mock.call_args_list)
+    assert "deferred" in printed
+    assert "timeout" in printed
+
+
+def test_first_cycle_deadline_is_deterministic_slot_order(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    queue = SequenceQueue()
+    try:
+        # The shared base is captured once atomically; every slot deadline then
+        # derives from that identical base, so ordering is purely slot-index.
+        slot_0 = main._resolve_first_cycle_jump_deadline(queue, slot_id=0, next_jump_plot_deadline=None)
+        slot_1 = main._resolve_first_cycle_jump_deadline(queue, slot_id=1, next_jump_plot_deadline=None)
+        slot_2 = main._resolve_first_cycle_jump_deadline(queue, slot_id=2, next_jump_plot_deadline=None)
+        slot_5 = main._resolve_first_cycle_jump_deadline(queue, slot_id=5, next_jump_plot_deadline=None)
+    finally:
+        queue.shutdown()
+
+    assert slot_1 > slot_0
+    assert slot_1 - slot_0 == pytest.approx(main.FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS)
+    assert slot_5 > slot_2
+    assert (slot_5 - slot_0) == pytest.approx(5 * main.FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS)
+
+    # next_jump_plot_deadline passes through unchanged on subsequent cycles.
+    explicit_deadline = 4321.0
+    assert (
+        main._resolve_first_cycle_jump_deadline(
+            queue, slot_id=99, next_jump_plot_deadline=explicit_deadline,
+        )
+        == explicit_deadline
+    )
+
+    fallback = main._resolve_first_cycle_jump_deadline(None, slot_id=3, next_jump_plot_deadline=None)
+    assert isinstance(fallback, float)
+
+
+def test_first_cycle_deadline_orders_concurrent_workers_by_slot(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    num_slots = 6
+    queue = SequenceQueue()
+    # The batch initiator arms the first-cycle barrier so the queue withholds
+    # dispatch until every sibling jump block is pending; only then can the
+    # deadline sort impose slot-index order.
+    queue.arm_first_cycle_barrier(expected_count=num_slots, timeout_seconds=5.0)
+    execution_order: list[int] = []
+    order_lock = threading.Lock()
+    barrier = threading.Barrier(num_slots)
+
+    def worker(slot_id: int) -> None:
+        # Block until every thread is ready, then release them all at once so
+        # the claim/submit calls race under real OS scheduling skew.
+        barrier.wait()
+        deadline = main._resolve_first_cycle_jump_deadline(
+            queue, slot_id=slot_id, next_jump_plot_deadline=None,
+        )
+
+        def block_run(slot: int = slot_id) -> None:
+            with order_lock:
+                execution_order.append(slot)
+
+        queue.submit_jump_plot(
+            slot_id=f"slot-{slot_id}",
+            run=block_run,
+            deadline=deadline,
+            estimated_duration=1.0,
+            cancel_event=threading.Event(),
+        )
+
+    try:
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_slots)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        wait_deadline = time.monotonic() + 5.0
+        while len(execution_order) < num_slots and time.monotonic() < wait_deadline:
+            time.sleep(0.01)
+    finally:
+        queue.shutdown()
+
+    assert execution_order == list(range(num_slots)), (
+        f"Expected slot-index execution order [0..{num_slots - 1}], got {execution_order}"
+    )
+
+
+def test_first_cycle_barrier_holds_head_block_until_siblings_arrive(
+    tmp_path: Path,
+) -> None:
+    # The regression: the head (first-submitted) block must NOT run while the
+    # queue is idle before its later-indexed siblings are submitted. Submit
+    # slot-2 first with the latest deadline, then slots 1 and 0; the barrier
+    # must still dispatch them strictly by slot index.
+    _ = _load_main_with_mocks(tmp_path)
+    queue = SequenceQueue()
+    queue.arm_first_cycle_barrier(expected_count=3, timeout_seconds=5.0)
+    execution_order: list[int] = []
+    order_lock = threading.Lock()
+
+    def make_block(slot: int) -> Callable[[], None]:
+        def block_run() -> None:
+            with order_lock:
+                execution_order.append(slot)
+
+        return block_run
+
+    try:
+        base = time.monotonic()
+        # Submit the highest-index slot first; if the barrier were absent it
+        # would run immediately while the queue is idle.
+        for slot in (2, 1, 0):
+            queue.submit_jump_plot(
+                slot_id=f"slot-{slot}",
+                run=make_block(slot),
+                deadline=base + slot * 0.001,
+                estimated_duration=1.0,
+                cancel_event=threading.Event(),
+            )
+            # Give a would-be premature dispatch a chance to misfire.
+            time.sleep(0.02)
+
+        wait_deadline = time.monotonic() + 5.0
+        while len(execution_order) < 3 and time.monotonic() < wait_deadline:
+            time.sleep(0.01)
+    finally:
+        queue.shutdown()
+
+    assert execution_order == [0, 1, 2], (
+        f"Expected slot-index order [0, 1, 2], got {execution_order}"
+    )
+
+
+def test_first_cycle_barrier_releases_on_timeout_when_sibling_missing(
+    tmp_path: Path,
+) -> None:
+    # Safety valve: if an expected sibling never submits (e.g. its worker failed
+    # to start), the already-pending block must still dispatch once the barrier
+    # timeout elapses rather than stalling forever.
+    _ = _load_main_with_mocks(tmp_path)
+    queue = SequenceQueue()
+    queue.arm_first_cycle_barrier(expected_count=3, timeout_seconds=0.2)
+    ran = threading.Event()
+
+    try:
+        handle = queue.submit_jump_plot(
+            slot_id="slot-0",
+            run=lambda: ran.set(),
+            deadline=time.monotonic(),
+            estimated_duration=1.0,
+            cancel_event=threading.Event(),
+        )
+        # Only one of three expected blocks submitted: must wait for timeout.
+        assert ran.wait(0.1) is False
+        assert ran.wait(2.0) is True
+        assert handle.result(timeout=1.0) is None
+    finally:
+        queue.shutdown()
+
+
+def test_traversal_slot_skips_restock_on_final_route_element(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+    clock = _ManualClock(start=1000.0)
+    options = _make_options(tmp_path)
+    journal = MagicMock()
+    journal.reset_cancel.return_value = None
+    journal.reset_jump.return_value = None
+    journal.jump_cancelled.return_value = False
+    journal.has_jumped.return_value = True
+    departure = datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc)
+    runtime_context = _make_runtime_context(
+        options=options,
+        sequence_queue=object(),
+        journal=journal,
+        slot_id=0,
+        sleep=lambda _seconds: None,
+    )
+    runtime_context.cancel_event.wait = (  # type: ignore[assignment]
+        lambda timeout=None: clock.advance(float(timeout or 0.0)) or False
+    )
+
+    def fake_run_coordinated_jump_plot(**_kwargs: object) -> tuple[int, datetime.datetime]:
+        return 6, departure
+
+    with patch("builtins.print"), \
+         patch.object(main, "DiscordHandler", return_value=MagicMock()), \
+         patch.object(main, "Reshandler", _FakeResHandler), \
+         patch.object(main, "load_route_list", return_value=["Sol"]), \
+         patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
+         patch.object(main, "consume_save", return_value=None), \
+         patch.object(main.time, "monotonic", side_effect=clock.now), \
+         patch.object(main.time, "sleep", side_effect=clock.advance), \
+         patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
+         patch.object(main, "_run_coordinated_restock") as restock_mock:
+        assert main._run_traversal_slot(runtime_context) is True
+
+    restock_mock.assert_not_called()
 
 
 def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:
@@ -848,3 +1104,11 @@ def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:
         result = main._run_traversal_slot(runtime_context)
 
     assert result is False
+
+
+def test_timing_constants_are_documented_and_correct(tmp_path: Path) -> None:
+    main = _load_main_with_mocks(tmp_path)
+
+    assert main.CARRIER_COOLDOWN_SECONDS == 362
+    assert main.RESTOCK_TRIGGER_REMAINING_SECONDS == 300
+    assert main.ESTIMATED_CYCLE_SECONDS == 1320

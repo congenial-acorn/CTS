@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import os
 import time
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -47,6 +48,7 @@ from TraversalSystem.gui.binding_controller import (
     BindingSnapshot,
     SlotClassification,
 )
+from TraversalSystem.gui.worker_controller import WorkerController
 from TraversalSystem.gui.worker_state import WorkerState
 from TraversalSystem.gui.dashboard import DashboardWidget
 from TraversalSystem.gui.scheduled_jump import ScheduledJumpController
@@ -62,12 +64,13 @@ def _frozen_clock_controller():
     """Subclass with a frozen clock so schedule() always succeeds."""
 
     class _Frozen(ScheduledJumpController):
-        def __init__(self, parent=None):
+        def __init__(self, parent=None, submit_func=None):
             super().__init__(
                 time_provider=lambda: _MOCK_NOW,
                 focus_func=lambda binding: None,
                 click_func=lambda x, y: None,
                 sleep_func=lambda s: None,
+                submit_func=submit_func,
                 parent=parent,
             )
 
@@ -106,6 +109,9 @@ class MockWorkerController(QObject):
 
     def slot_state(self, idx):
         return WorkerState.READY
+
+    def peek_shared_sequence_queue(self):
+        return None
 
 
 def _make_window_info(handle=1234):
@@ -198,7 +204,7 @@ class TestScheduledJumpIntegration:
         config = _make_config(tmp_path)
         bc = _make_binding_ctrl()
         wc = MockWorkerController()
-        dash = DashboardWidget(config, bc, wc)
+        dash = DashboardWidget(config, bc, cast(WorkerController, cast(object, wc)))
 
         assert dash.slot_widgets[0].sj_schedule_btn.isEnabled()
         dash.slot_widgets[0].sj_schedule_btn.click()
@@ -220,7 +226,7 @@ class TestScheduledJumpIntegration:
         config = _make_config(tmp_path)
         bc = _make_binding_ctrl()
         wc = MockWorkerController()
-        dash = DashboardWidget(config, bc, wc)
+        dash = DashboardWidget(config, bc, cast(WorkerController, cast(object, wc)))
 
         dash.slot_widgets[0].sj_schedule_btn.click()
         qapp.processEvents()
@@ -239,7 +245,7 @@ class TestScheduledJumpIntegration:
         config = _make_config(tmp_path)
         bc = _make_binding_ctrl(has_binding=False, classification=SlotClassification.UNBOUND)
         wc = MockWorkerController()
-        dash = DashboardWidget(config, bc, wc)
+        dash = DashboardWidget(config, bc, cast(WorkerController, cast(object, wc)))
 
         # Call _on_schedule_jump directly (button is disabled for UNBOUND)
         dash._on_schedule_jump(0)
@@ -253,7 +259,7 @@ class TestScheduledJumpIntegration:
         config = _make_config(tmp_path, btn_x=0, btn_y=0)
         bc = _make_binding_ctrl()
         wc = MockWorkerController()
-        dash = DashboardWidget(config, bc, wc)
+        dash = DashboardWidget(config, bc, cast(WorkerController, cast(object, wc)))
 
         assert not dash.slot_widgets[0].sj_schedule_btn.isEnabled()
 
@@ -262,7 +268,7 @@ class TestScheduledJumpIntegration:
         config = _make_config(tmp_path)
         bc = _make_binding_ctrl()
         wc = MockWorkerController()
-        dash = DashboardWidget(config, bc, wc)
+        dash = DashboardWidget(config, bc, cast(WorkerController, cast(object, wc)))
 
         # First schedule
         dash._on_schedule_jump(0)

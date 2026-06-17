@@ -246,6 +246,148 @@ class TestScheduledJumpController:
         assert "completed" in status
         assert controller.is_scheduled is False
 
+    def test_click_at_t_zero_submits_shared_queue_block(self, qapp):
+        submit_func = Mock()
+        click_func = Mock()
+        focus_func = Mock()
+        binding = Mock()
+
+        schedule_time = _utc(2026, 1, 1, 11, 59, 59)
+        tick_time = _utc(2026, 1, 1, 12, 0, 0)
+        schedule_done = [False]
+
+        def time_fn():
+            if not schedule_done[0]:
+                return schedule_time
+            return tick_time
+
+        controller = ScheduledJumpController(
+            time_provider=time_fn,
+            focus_func=focus_func,
+            click_func=click_func,
+            submit_func=submit_func,
+            parent=qapp,
+        )
+
+        controller.schedule(
+            target_utc=_utc_time(12, 0, 0),
+            button_x=150,
+            button_y=250,
+            binding=binding,
+        )
+
+        schedule_done[0] = True
+
+        controller._tick()
+
+        submit_func.assert_called_once()
+        args = submit_func.call_args.args
+        assert len(args) == 3
+        run_callable, deadline, cancel_event = args
+        assert callable(run_callable)
+        assert isinstance(deadline, float)
+        assert cancel_event is controller._cancel_event
+        click_func.assert_not_called()
+
+        run_callable()
+
+        focus_func.assert_called_once_with(binding)
+        click_func.assert_called_once_with(150, 250)
+
+    def test_click_at_t_zero_without_submit_func_uses_direct_click(self, qapp):
+        click_func = Mock()
+        focus_func = Mock()
+
+        schedule_time = _utc(2026, 1, 1, 11, 59, 59)
+        tick_time = _utc(2026, 1, 1, 12, 0, 0)
+        schedule_done = [False]
+
+        def time_fn():
+            if not schedule_done[0]:
+                return schedule_time
+            return tick_time
+
+        controller = ScheduledJumpController(
+            time_provider=time_fn,
+            focus_func=focus_func,
+            click_func=click_func,
+            submit_func=None,
+            parent=qapp,
+        )
+
+        controller.schedule(
+            target_utc=_utc_time(12, 0, 0),
+            button_x=150,
+            button_y=250,
+            binding=Mock(),
+        )
+
+        schedule_done[0] = True
+
+        controller._tick()
+
+        click_func.assert_called_once_with(150, 250)
+
+    def test_cancel_sets_active_queue_cancel_event(self, qapp):
+        now = _utc(2026, 1, 1, 12, 0, 0)
+        controller = ScheduledJumpController(
+            time_provider=lambda: now,
+            submit_func=Mock(),
+            parent=qapp,
+        )
+
+        controller.schedule(
+            target_utc=_utc_time(12, 0, 30),
+            button_x=100,
+            button_y=200,
+            binding=Mock(),
+        )
+
+        cancel_event = controller._cancel_event
+        assert cancel_event.is_set() is False
+
+        controller.cancel()
+
+        assert cancel_event.is_set() is True
+
+    def test_submit_func_skips_early_focus_branch(self, qapp):
+        focus_func = Mock()
+        click_func = Mock()
+        submit_func = Mock()
+
+        times = [
+            _utc(2026, 1, 1, 12, 0, 0),
+            _utc(2026, 1, 1, 12, 0, 2),
+        ]
+        idx = 0
+
+        def time_fn():
+            nonlocal idx
+            t = times[min(idx, len(times) - 1)]
+            idx += 1
+            return t
+
+        controller = ScheduledJumpController(
+            time_provider=time_fn,
+            focus_func=focus_func,
+            click_func=click_func,
+            submit_func=submit_func,
+            parent=qapp,
+        )
+
+        controller.schedule(
+            target_utc=_utc_time(12, 0, 12),
+            button_x=100,
+            button_y=200,
+            binding=Mock(),
+        )
+
+        controller._tick()
+
+        focus_func.assert_not_called()
+        click_func.assert_not_called()
+        submit_func.assert_not_called()
+
     # -- 6. cancel() stops timer and emits "cancelled" ------------------------
 
     def test_cancel_stops_timer(self, qapp):

@@ -9,6 +9,7 @@ import random
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import TimeoutError as QueueTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Protocol, Tuple, cast
@@ -63,18 +64,68 @@ SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
 DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS = 30.0
 DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
+CARRIER_COOLDOWN_SECONDS = 362
+"""Elite Dangerous carrier jump cooldown: 6 min + 2 s buffer for journal/server confirmation latency."""
+RESTOCK_TRIGGER_REMAINING_SECONDS = 300
+"""Trigger tritium restock when 5 minutes REMAIN on the cooldown clock (fires ~62 s into the 362 s cooldown, then waits for journal jump-confirmation). NOT 5 min elapsed — maximizes post-restock buffer before the next jump."""
+ESTIMATED_CYCLE_SECONDS = 1320
+"""Estimated wall-clock seconds per jump cycle, used for arrival-time ETA (22 min)."""
 RESTOCK_FIXED_OVERHEAD_SECONDS = 30.0
 RESTOCK_PER_SLOT_SECONDS = 0.6
+RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS = 0.05
+"""xdotool --sync subprocess cost per focus-gated input on X11; ~0 on Windows (already-foreground short-circuit)."""
+RESTOCK_INPUTS_FIXED = 40
+"""Conservative count of focus-gated input primitives across restock_fc/open_cargo_transfer/restock_cargo sequences."""
+RESTOCK_INPUTS_PER_SLOT = 2
+"""Navigation keypresses per tritium slot."""
+RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS = 180.0
+"""Upper bound on waiting for the shared queue to execute a restock block. Prevents indefinite worker stall under sustained cross-carrier queue contention; on timeout the restock is skipped for this cycle and retried next cooldown."""
+FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS = 0.001
+"""Tiny per-slot deadline offset seeded into the first-cycle jump-plot deadline so the SequenceQueue (deadline, sequence) sort resolves to slot-index order on the first jump. Smaller than the ~10 s startup wait, large enough to break deadline ties deterministically."""
 JOURNAL_CONFIRMATION_TIMEOUT_SECONDS = 300.0
 
 
 def estimate_restock_duration(tritium_slot: int) -> float:
-    return RESTOCK_FIXED_OVERHEAD_SECONDS + RESTOCK_PER_SLOT_SECONDS * tritium_slot
+    focus_inputs = RESTOCK_INPUTS_FIXED + RESTOCK_INPUTS_PER_SLOT * tritium_slot
+    return (
+        RESTOCK_FIXED_OVERHEAD_SECONDS
+        + RESTOCK_PER_SLOT_SECONDS * tritium_slot
+        + RESTOCK_FOCUS_OVERHEAD_PER_INPUT_SECONDS * focus_inputs
+    )
 
 
 def resolve_save_path(base_dir: Path, *, slot_id: int) -> Path:
     """Return the deterministic save path for a given GUI slot."""
     return base_dir / f"save-slot-{slot_id}.txt"
+
+
+def _resolve_first_cycle_jump_deadline(
+    sequence_queue: object | None,
+    slot_id: int | None,
+    next_jump_plot_deadline: float | None,
+) -> float:
+    """Return the deadline for the first auto-plotted jump of a cycle.
+
+    When ``next_jump_plot_deadline`` is set (subsequent cycles), pass it through.
+    On the FIRST cycle (None), derive a deadline whose ordering across
+    concurrently-started workers is strictly slot-index deterministic: when a
+    real SequenceQueue is present, claim against its shared, atomically-captured
+    base (see ``SequenceQueue.claim_first_cycle_deadline``) so per-worker
+    ``time.monotonic()`` skew cannot reorder slots. Strict ordering also
+    requires the batch initiator to have armed the queue's first-cycle barrier
+    (``SequenceQueue.arm_first_cycle_barrier``, done by
+    ``WorkerController.start_all_ready``) so the queue holds dispatch until all
+    sibling jump blocks are pending. Fall back to a local ``time.monotonic()``
+    seed only when no shared queue exists (single-carrier / CLI paths where
+    ordering is moot).
+    """
+    if next_jump_plot_deadline is not None:
+        return next_jump_plot_deadline
+    slot_index = slot_id or 0
+    claim = getattr(sequence_queue, "claim_first_cycle_deadline", None)
+    if callable(claim):
+        return cast(float, claim(slot_index, offset_seconds=FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS))
+    return time.monotonic() + slot_index * FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS
 
 
 class InputHandlerAdapter(Protocol):
@@ -92,6 +143,7 @@ class InputHandlerAdapter(Protocol):
 
 class SubmissionHandleAdapter(Protocol):
     def result(self, timeout: float | None = None) -> object: ...
+    def cancel(self) -> object: ...
 
 
 def _resolve_input_handler(
@@ -642,7 +694,16 @@ def _run_coordinated_restock(
             cancel_event=effective_cancel_event,
         ),
     )
-    _ = handle.result()
+    try:
+        _ = handle.result(timeout=RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS)
+    except QueueTimeoutError:
+        print(
+            "Restock deferred: shared queue contention exceeded "
+            f"{RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS:.0f}s timeout. "
+            "Skipping restock this cycle; will retry on the next cooldown."
+        )
+        handle.cancel()
+        return
 
 
 def handle_critical_error(
@@ -813,7 +874,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         for idx, system in enumerate(route_list):
             if idx < state.line_no:
                 continue
-            delta = delta + datetime.timedelta(seconds=1320)
+            delta = delta + datetime.timedelta(seconds=ESTIMATED_CYCLE_SECONDS)
 
         arrival_time = current_time + delta
         arrival_time_discord = (
@@ -844,10 +905,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     runtime_context.raise_if_cancelled()
                     jump_plot_deadline = None
                     if options.auto_plot_jumps:
-                        jump_plot_deadline = (
-                            next_jump_plot_deadline
-                            if next_jump_plot_deadline is not None
-                            else time.monotonic()
+                        jump_plot_deadline = _resolve_first_cycle_jump_deadline(
+                            sequence_queue,
+                            slot_id,
+                            next_jump_plot_deadline,
                         )
                     time_to_jump, departing_time = _run_coordinated_jump_plot(
                         sequence_queue=sequence_queue,
@@ -946,6 +1007,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     return _handle_jump_cancelled(system, revert_index=False)
                 runtime_context.wait(1)
 
+                # Discord embed progress milestones (cooldown countdown).
                 match total_time:
                     case 600:
                         discord_messenger.update_fields(1, 1)
@@ -977,14 +1039,15 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             state.line_no += 1
 
             print("Counting down until next jump...")
-            total_time = 362
-            cooldown_deadline = time.monotonic() + 362.0
+            total_time = CARRIER_COOLDOWN_SECONDS
+            cooldown_deadline = time.monotonic() + CARRIER_COOLDOWN_SECONDS
             if idx + 1 < len(route_list):
                 register_next_jump_deadline(total_time)
             while total_time > 0:
                 runtime_context.transition("waiting")
                 print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
+                # Discord embed progress milestones (cooldown countdown).
                 match total_time:
                     case 340:
                         discord_messenger.update_fields(6, 7)
@@ -995,7 +1058,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     case 100:
                         discord_messenger.update_fields(8, 9)
 
-                if total_time == 300:
+                if total_time == RESTOCK_TRIGGER_REMAINING_SECONDS:
                     print("\nPausing execution until jump is confirmed...")
                     completed = False
                     confirmation_started_at = time.monotonic()
@@ -1024,22 +1087,23 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     print("Jump complete!")
                     runtime_context.transition("running")
                     discord_messenger.update_fields(8, 7)
-                    print("Submitting tritium restock to shared queue...")
                     clear_registered_jump_deadline()
-                    restock_started_at = time.monotonic()
-                    _run_coordinated_restock(
-                        sequence_queue=sequence_queue,
-                        queue_slot_id=queue_slot_id,
-                        cancel_event=runtime_context.cancel_event,
-                        runtime_context=runtime_context,
-                        options=options,
-                        sequence_dir=SEQUENCE_DIR,
-                        focus_handler=focus_dependency,
-                    )
-                    restock_elapsed = time.monotonic() - restock_started_at
-                    total_time = max(0, total_time - int(restock_elapsed))
-                    if idx + 1 < len(route_list) and total_time > 0:
-                        register_next_jump_deadline(total_time)
+                    if idx + 1 < len(route_list):
+                        print("Submitting tritium restock to shared queue...")
+                        restock_started_at = time.monotonic()
+                        _run_coordinated_restock(
+                            sequence_queue=sequence_queue,
+                            queue_slot_id=queue_slot_id,
+                            cancel_event=runtime_context.cancel_event,
+                            runtime_context=runtime_context,
+                            options=options,
+                            sequence_dir=SEQUENCE_DIR,
+                            focus_handler=focus_dependency,
+                        )
+                        restock_elapsed = time.monotonic() - restock_started_at
+                        total_time = max(0, total_time - int(restock_elapsed))
+                        if total_time > 0:
+                            register_next_jump_deadline(total_time)
 
                 runtime_context.wait(1)
                 total_time -= 1

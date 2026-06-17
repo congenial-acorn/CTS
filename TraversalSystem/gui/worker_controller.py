@@ -313,6 +313,16 @@ class WorkerController(QObject):
     def start_all_ready(self) -> tuple[list[int], dict[int, str]]:
         started: list[int] = []
         skip_reasons: dict[int, str] = {}
+        # Arm the shared queue's first-cycle ordering barrier for this batch so
+        # the first jumps dispatch in strict slot-index order regardless of
+        # per-worker submission timing or OS scheduling skew.
+        ready_count = sum(
+            1
+            for record in self._records.values()
+            if record.slot.enabled
+            and record.state_machine.state is WorkerState.READY
+        )
+        self._arm_first_cycle_batch(ready_count)
         for slot_index in sorted(self._records):
             record = self._records[slot_index]
             if not record.slot.enabled:
@@ -352,6 +362,29 @@ class WorkerController(QObject):
             if self.stop_slot(slot_index):
                 stopped.append(slot_index)
         return stopped
+
+    def peek_shared_sequence_queue(self) -> object | None:
+        return self._shared_sequence_queue_dependency
+
+    def _arm_first_cycle_batch(self, expected_count: int) -> None:
+        """Prepare the shared queue's first-cycle ordering barrier for a start
+        batch of *expected_count* slots.
+
+        With two or more slots, force the shared queue into existence and arm
+        the barrier so the first jumps dispatch in strict slot-index order. With
+        fewer, ordering is moot, so do not force-create the queue (matches prior
+        behavior); just reset any stale base on an existing queue.
+        """
+        if expected_count >= 2:
+            queue = self._get_shared_sequence_queue_dependency()
+            arm = getattr(queue, "arm_first_cycle_barrier", None)
+            if callable(arm):
+                arm(expected_count=expected_count)
+                return
+        queue = self.peek_shared_sequence_queue()
+        reset_base = getattr(queue, "reset_first_cycle_base", None)
+        if callable(reset_base):
+            reset_base()
 
     def slot_state(self, slot_index: int) -> WorkerState:
         return self._records[slot_index].state_machine.state

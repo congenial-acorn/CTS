@@ -5,11 +5,25 @@ and pynput on Linux/macOS.
 """
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
+
 import sys
 import time
 from typing import Optional
 
 IS_WINDOWS = sys.platform == "win32"
+
+# Dispatch here is process-global, not window-targeted. On Linux/macOS the
+# module-level ``_keyboard``/``_mouse`` singletons emit to whichever window is
+# currently foreground; on Windows, ``pydirectinput`` similarly targets the
+# current foreground/global input state. That means
+# ``FocusAwareInputHandler.ensure_focus()`` plus the subsequent keypress/click is
+# not atomic across concurrent workers: another worker can steal focus after the
+# focus check returns but before the input lands. ``FocusGuard`` narrows that
+# race by blocking until focus is re-acquired immediately before dispatch, but it
+# cannot eliminate the gap entirely. A future architectural fix would use
+# window-targeted primitives instead (for example ``SendInput``/``PostMessage``
+# with HWND on Windows or ``xdotool --window <wid>`` on X11).
 
 if IS_WINDOWS:
     import pydirectinput

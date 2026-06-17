@@ -9,6 +9,10 @@ from typing import Callable, Generic, Literal, TypeVar, cast, final
 
 T = TypeVar("T")
 DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
+DEFAULT_FIRST_CYCLE_BARRIER_TIMEOUT_SECONDS = 30.0
+"""Safety valve for the first-cycle ordering barrier: if an expected sibling
+never submits its jump block (e.g. its worker failed to start), dispatch the
+blocks already pending once this many seconds elapse rather than stalling."""
 
 
 class CancelledBlockError(CancelledError):
@@ -91,6 +95,13 @@ class SequenceQueue:
         self._registered_jump_deadlines: dict[str, float] = {}
         self._next_sequence: int = 0
         self._shutdown: bool = False
+        # Shared base + barrier for deterministic first-cycle jump ordering; see
+        # claim_first_cycle_deadline / arm_first_cycle_barrier.
+        self._first_cycle_base: float | None = None
+        self._first_cycle_expected: int = 0
+        self._first_cycle_arrived: int = 0
+        self._first_cycle_satisfied: bool = True
+        self._first_cycle_barrier_deadline: float | None = None
         self._worker: threading.Thread = threading.Thread(
             target=self._worker_main,
             name="cts-sequence-queue",
@@ -159,6 +170,80 @@ class SequenceQueue:
             if removed is not None:
                 self._condition.notify_all()
 
+    def claim_first_cycle_deadline(
+        self, slot_index: int, *, offset_seconds: float,
+    ) -> float:
+        """Return a deterministic first-cycle jump deadline for *slot_index*.
+
+        The base monotonic timestamp is captured once, atomically under the
+        lock, on the first claim; every worker in the same start batch then
+        shares that identical base, so only the per-slot offset varies. The
+        offset alone does NOT guarantee ordering, because the worker thread
+        would execute whichever block is submitted first while the queue is
+        idle. Pair this with ``arm_first_cycle_barrier`` (called by the batch
+        initiator before workers start): the barrier holds dispatch until every
+        sibling jump block is pending, at which point the ``(deadline,
+        sequence)`` sort in ``_select_next_locked`` resolves to strict
+        slot-index order regardless of per-worker submission timing or OS
+        scheduling skew.
+        """
+        with self._condition:
+            if self._first_cycle_base is None:
+                self._first_cycle_base = self._time_fn()
+            return self._first_cycle_base + slot_index * offset_seconds
+
+    def arm_first_cycle_barrier(
+        self,
+        *,
+        expected_count: int,
+        timeout_seconds: float = DEFAULT_FIRST_CYCLE_BARRIER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Arm the first-cycle ordering barrier for a start batch.
+
+        Holds dispatch of every ``jump_plot`` block until *expected_count* of
+        them are pending simultaneously (or *timeout_seconds* elapses), so the
+        deadline sort can order them by slot index instead of executing the
+        first-submitted block while the queue is idle. Resets the shared base so
+        each batch re-captures it. Call once, before the workers begin claiming
+        deadlines; pairs with ``claim_first_cycle_deadline``. With one or zero
+        expected blocks ordering is moot, so the barrier opens immediately.
+        """
+        with self._condition:
+            self._first_cycle_base = None
+            self._first_cycle_arrived = 0
+            self._first_cycle_expected = max(0, expected_count)
+            self._first_cycle_satisfied = self._first_cycle_expected <= 1
+            self._first_cycle_barrier_deadline = (
+                None
+                if self._first_cycle_satisfied
+                else self._time_fn() + timeout_seconds
+            )
+            self._condition.notify_all()
+
+    def reset_first_cycle_base(self) -> None:
+        """Clear the shared first-cycle base so the next batch re-captures it.
+
+        Does not arm the ordering barrier; use ``arm_first_cycle_barrier`` when
+        two or more workers start concurrently and need strict slot ordering.
+        """
+        with self._condition:
+            self._first_cycle_base = None
+
+    def _first_cycle_barrier_open_locked(self) -> bool:
+        """Return whether gated ``jump_plot`` blocks may now be dispatched.
+
+        Latches open once every expected sibling has arrived or the barrier
+        timeout passes, so it never re-closes within a batch. Caller must hold
+        ``self._condition``.
+        """
+        if self._first_cycle_satisfied:
+            return True
+        deadline = self._first_cycle_barrier_deadline
+        if deadline is not None and self._time_fn() >= deadline:
+            self._first_cycle_satisfied = True
+            return True
+        return False
+
     def can_start_restock(self, *, estimated_duration: float) -> bool:
         """Public inspection helper: check whether a restock of *estimated_duration* would finish before the earliest pending jump deadline; production scheduling still happens inside ``_select_next_locked``."""
         with self._condition:
@@ -192,6 +277,10 @@ class SequenceQueue:
                 raise RuntimeError("SequenceQueue is shut down.")
             if kind == "jump_plot":
                 _ = self._registered_jump_deadlines.pop(slot_id, None)
+                if not self._first_cycle_satisfied:
+                    self._first_cycle_arrived += 1
+                    if self._first_cycle_arrived >= self._first_cycle_expected:
+                        self._first_cycle_satisfied = True
             block = _PendingBlock(
                 kind=kind,
                 sequence=self._next_sequence,
@@ -257,10 +346,16 @@ class SequenceQueue:
         if not self._pending:
             return None
 
-        jumps = sorted(
-            (block for block in self._pending if block.kind == "jump_plot"),
-            key=lambda block: (block.handle.deadline, block.sequence),
-        )
+        if self._first_cycle_barrier_open_locked():
+            jumps = sorted(
+                (block for block in self._pending if block.kind == "jump_plot"),
+                key=lambda block: (block.handle.deadline, block.sequence),
+            )
+        else:
+            # First-cycle barrier still closed: withhold every jump block until
+            # all expected siblings are pending so the sort above orders them by
+            # slot index rather than dispatching whichever arrived first.
+            jumps = []
         restocks = sorted(
             (block for block in self._pending if block.kind == "restock"),
             key=lambda block: block.sequence,

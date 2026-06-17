@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import threading
 import time
 from collections.abc import Callable
 from typing import Optional
@@ -11,6 +12,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from TraversalSystem import input_handler as _input_handler
 from TraversalSystem.window_manager import FocusGuard
+
+
+SCHEDULED_JUMP_ESTIMATE_SECONDS = 5.0
+"""Estimated wall-clock seconds for a scheduled-jump focus+click block; used by the SequenceQueue feasibility gate so the block won't overlap a pending carrier jump."""
 
 
 class ScheduledJumpController(QObject):
@@ -29,6 +34,7 @@ class ScheduledJumpController(QObject):
         focus_func: Callable[..., None] | None = None,
         click_func: Callable[[int, int], None] | None = None,
         sleep_func: Callable[[float], None] | None = None,
+        submit_func: Callable[[Callable[[], None], float, threading.Event], object] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -45,6 +51,8 @@ class ScheduledJumpController(QObject):
             click_func or (lambda x, y: _input_handler.click(x, y))
         )
         self._sleep_func: Callable[[float], None] = sleep_func or time.sleep
+        self._submit_func = submit_func
+        """When set, the jump click+focus is submitted as a serialized block through the shared SequenceQueue so it cannot interleave with active worker automation. When None, the click fires directly (legacy behavior, safe only when no workers are active)."""
 
         # Internal timer (1-second tick)
         self._timer = QTimer(self)
@@ -57,6 +65,7 @@ class ScheduledJumpController(QObject):
         self._button_y: int = 0
         self._binding: object | None = None
         self._focus_attempted: bool = False
+        self._cancel_event = threading.Event()
 
     # -- Properties ------------------------------------------------------------
 
@@ -99,6 +108,7 @@ class ScheduledJumpController(QObject):
         self._button_y = button_y
         self._binding = binding
         self._focus_attempted = False
+        self._cancel_event = threading.Event()
 
         self._timer.start(1000)
         self.status_changed.emit("scheduled")
@@ -109,6 +119,7 @@ class ScheduledJumpController(QObject):
 
     def cancel(self) -> None:
         """Cancel an active countdown."""
+        self._cancel_event.set()
         self._timer.stop()
         self._target_time = None
         self._binding = None
@@ -125,13 +136,24 @@ class ScheduledJumpController(QObject):
 
         if delta <= 0:
             # Time's up — click the button
-            self._click_func(self._button_x, self._button_y)
+            if self._submit_func is not None:
+                self._submit_func(
+                    self._make_fire_block(),
+                    time.monotonic(),
+                    self._cancel_event,
+                )
+            else:
+                self._click_func(self._button_x, self._button_y)
             self._cleanup()
             self.status_changed.emit("completed")
             return
 
         # Attempt focus when within 10 seconds
-        if delta <= 10 and not self._focus_attempted:
+        if (
+            self._submit_func is None
+            and delta <= 10
+            and not self._focus_attempted
+        ):
             self._focus_attempted = True
             focus = self._resolve_focus_func()
             try:
@@ -176,6 +198,18 @@ class ScheduledJumpController(QObject):
         self._target_time = None
         self._binding = None
         self._focus_attempted = False
+
+    def _make_fire_block(self) -> Callable[[], None]:
+        binding = self._binding
+        button_x = self._button_x
+        button_y = self._button_y
+        focus = self._resolve_focus_func()
+
+        def run() -> None:
+            focus(binding)
+            self._click_func(button_x, button_y)
+
+        return run
 
     def _resolve_focus_func(self) -> Callable[..., None]:
         """Return the focus callable, lazily wrapping FocusGuard if needed."""
