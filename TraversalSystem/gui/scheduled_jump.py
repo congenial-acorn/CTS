@@ -137,9 +137,15 @@ class ScheduledJumpController(QObject):
         if delta <= 0:
             # Time's up — click the button
             if self._submit_func is not None:
+                # Submit a deadline slightly in the future (not bare "now"): the
+                # queue's restock-feasibility gate excludes deadlines that are
+                # already <= now (strict `> now`), so a bare time.monotonic()
+                # deadline would fail to gate concurrent restocks and the click
+                # could be delayed behind one (Bug C). A small positive offset
+                # keeps it the earliest jump while still gating.
                 self._submit_func(
                     self._make_fire_block(),
-                    time.monotonic(),
+                    time.monotonic() + SCHEDULED_JUMP_ESTIMATE_SECONDS,
                     self._cancel_event,
                 )
             else:
