@@ -67,7 +67,7 @@ DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
 CARRIER_COOLDOWN_SECONDS = 362
 """Elite Dangerous carrier jump cooldown: 6 min + 2 s buffer for journal/server confirmation latency."""
 RESTOCK_TRIGGER_REMAINING_SECONDS = 300
-"""Trigger tritium restock when 5 minutes REMAIN on the cooldown clock (fires ~62 s into the 362 s cooldown, then waits for journal jump-confirmation). NOT 5 min elapsed — maximizes post-restock buffer before the next jump."""
+"""Trigger the jump-confirmation gate when 5 minutes REMAIN on the cooldown clock. The coordinated restock now fires immediately after a successful post-plot lockout (skip the first plotted jump)."""
 ESTIMATED_CYCLE_SECONDS = 1320
 """Estimated wall-clock seconds per jump cycle, used for arrival-time ETA (22 min)."""
 RESTOCK_FIXED_OVERHEAD_SECONDS = 30.0
@@ -959,6 +959,21 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
                 journal.reset_jump()
 
+                if done_first:
+                    print("Submitting tritium restock to shared queue...")
+                    restock_started_at = time.monotonic()
+                    _run_coordinated_restock(
+                        sequence_queue=sequence_queue,
+                        queue_slot_id=queue_slot_id,
+                        cancel_event=runtime_context.cancel_event,
+                        runtime_context=runtime_context,
+                        options=options,
+                        sequence_dir=SEQUENCE_DIR,
+                        focus_handler=focus_dependency,
+                    )
+                    restock_elapsed = time.monotonic() - restock_started_at
+                    time_to_jump = max(0, time_to_jump - int(restock_elapsed))
+
                 total_time = max(0, time_to_jump - 6)
 
                 if total_time > 900:
@@ -1024,36 +1039,41 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     route_name,
                 )
 
-            while total_time > 0:
+            jump_countdown_deadline = time.monotonic() + total_time
+            # Milestones fire on threshold-crossing (once when remaining first
+            # falls at/below the trigger). With a deadline-derived countdown
+            # the displayed value can skip integers if the loop ever stalls, so
+            # exact-equality matching (the old `match` form) would silently
+            # miss values — same bug class as the cooldown loop below.
+            jump_milestones = (
+                (600, 1, 1),
+                (200, 2, 2),
+                (190, 2, 3),
+                (144, 2, 4),
+                (103, 2, 5),
+                (90, 2, 6),
+                (75, 2, 7),
+                (60, 3, 7),
+                (30, 4, 7),
+            )
+            jump_fired_milestones: set[int] = set()
+            while True:
+                total_time = max(0, int(jump_countdown_deadline - time.monotonic()))
+                if total_time <= 0:
+                    break
                 runtime_context.transition("waiting")
                 print(f"Jump in {total_time:>4}s", end="\r", flush=True)
                 runtime_context.raise_if_cancelled()
                 if journal.jump_cancelled():
                     return _handle_jump_cancelled(system, revert_index=False)
-                runtime_context.wait(1)
 
                 # Discord embed progress milestones (cooldown countdown).
-                match total_time:
-                    case 600:
-                        discord_messenger.update_fields(1, 1)
-                    case 200:
-                        discord_messenger.update_fields(2, 2)
-                    case 190:
-                        discord_messenger.update_fields(2, 3)
-                    case 144:
-                        discord_messenger.update_fields(2, 4)
-                    case 103:
-                        discord_messenger.update_fields(2, 5)
-                    case 90:
-                        discord_messenger.update_fields(2, 6)
-                    case 75:
-                        discord_messenger.update_fields(2, 7)
-                    case 60:
-                        discord_messenger.update_fields(3, 7)
-                    case 30:
-                        discord_messenger.update_fields(4, 7)
+                for trigger, current_field, total_field in jump_milestones:
+                    if total_time <= trigger and trigger not in jump_fired_milestones:
+                        jump_fired_milestones.add(trigger)
+                        discord_messenger.update_fields(current_field, total_field)
 
-                total_time -= 1
+                runtime_context.wait(1)
             print()
             runtime_context.transition("running")
 
@@ -1068,16 +1088,20 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             cooldown_deadline = time.monotonic() + CARRIER_COOLDOWN_SECONDS
             # Milestones and the restock trigger latch on a "crossed this
             # threshold" basis (fire once when total_time first falls at/below
-            # the trigger), not on exact integer equality. The post-restock
-            # recalibration below can make total_time jump downward by several
-            # seconds; exact-equality matchers would silently skip any value
-            # stepped over (Bug F). Thresholds are listed in descending order.
+            # the trigger), not on exact integer equality. The deadline-derived
+            # countdown can skip integers if the loop ever stalls (e.g. the
+            # blocking restock-confirmation wait below); exact-equality
+            # matchers would silently skip any value stepped over (Bug F).
+            # Thresholds are listed in descending order.
             cooldown_milestones = ((340, 6, 7), (320, 7, 7), (151, 8, 8), (100, 8, 9))
             fired_milestones: set[int] = set()
             restock_triggered = False
             if idx + 1 < len(route_list):
                 register_next_jump_deadline(total_time)
-            while total_time > 0:
+            while True:
+                total_time = max(0, int(cooldown_deadline - time.monotonic()))
+                if total_time <= 0:
+                    break
                 runtime_context.transition("waiting")
                 print(f"Next jump in {total_time:>4}s", end="\r", flush=True)
 
@@ -1112,31 +1136,12 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                                 )
                             print("Jump not complete...")
                             runtime_context.wait(10)
-                    assert cooldown_deadline is not None
-                    total_time = max(0, int(cooldown_deadline - time.monotonic()))
                     print("Jump complete!")
                     runtime_context.transition("running")
                     discord_messenger.update_fields(8, 7)
                     clear_registered_jump_deadline()
-                    if idx + 1 < len(route_list):
-                        print("Submitting tritium restock to shared queue...")
-                        restock_started_at = time.monotonic()
-                        _run_coordinated_restock(
-                            sequence_queue=sequence_queue,
-                            queue_slot_id=queue_slot_id,
-                            cancel_event=runtime_context.cancel_event,
-                            runtime_context=runtime_context,
-                            options=options,
-                            sequence_dir=SEQUENCE_DIR,
-                            focus_handler=focus_dependency,
-                        )
-                        restock_elapsed = time.monotonic() - restock_started_at
-                        total_time = max(0, total_time - int(restock_elapsed))
-                        if total_time > 0:
-                            register_next_jump_deadline(total_time)
 
                 runtime_context.wait(1)
-                total_time -= 1
             print()
             clear_registered_jump_deadline()
             runtime_context.transition("running")

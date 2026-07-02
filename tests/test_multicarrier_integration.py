@@ -669,6 +669,9 @@ def _run_restock_cycle(
     *,
     restock_failure: BaseException | None = None,
     monotonic_side_effect: Callable[[], float] | None = None,
+    route_list: list[str] | None = None,
+    keyboard_interrupt_after: int | None = 2,
+    expected_result: bool = False,
 ) -> tuple[_FakeSequenceQueue, list[str]]:
     main = _load_main_with_mocks(tmp_path)
     order: list[str] = []
@@ -687,7 +690,7 @@ def _run_restock_cycle(
         nonlocal jump_calls
         jump_calls += 1
         order.append(f"jump-{jump_calls}")
-        if jump_calls > 1:
+        if keyboard_interrupt_after is not None and jump_calls > keyboard_interrupt_after:
             raise KeyboardInterrupt
         return 7, datetime.datetime.now(datetime.timezone.utc)
 
@@ -709,7 +712,7 @@ def _run_restock_cycle(
     with patch("builtins.print"), \
          patch.object(main, "DiscordHandler", return_value=MagicMock()), \
          patch.object(main, "Reshandler", _FakeResHandler), \
-         patch.object(main, "load_route_list", return_value=["A", "B"]), \
+         patch.object(main, "load_route_list", return_value=route_list or ["A", "B", "C"]), \
          patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
          patch.object(main, "consume_save", return_value=None), \
          patch.object(main, "save_progress"), \
@@ -720,9 +723,9 @@ def _run_restock_cycle(
         fake_time.monotonic.side_effect = monotonic_side_effect or clock.now
         fake_time.sleep.side_effect = fast_sleep
         if restock_failure is None:
-            assert main._run_traversal_slot(context) is False
+            assert main._run_traversal_slot(context) is expected_result
         else:
-            with pytest.raises(type(restock_failure), match=str(restock_failure)):
+            with pytest.raises(RuntimeError, match="Critical error stopped carrier slot."):
                 main._run_traversal_slot(context)
 
     return queue, order
@@ -736,7 +739,7 @@ def test_restock_queue_submission_blocks_until_queue_completion(tmp_path: Path) 
     assert len(queue.submit_restock_calls) == 1
     assert queue.submit_restock_calls[0][0:2] == ("slot-0", expected_duration)
     assert queue.submit_restock_calls[0][2] is not None
-    assert order == ["jump-1", "queue-result", "restock", "jump-2"]
+    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
     assert queue.deadlines == {}
 
 
@@ -748,7 +751,7 @@ def test_restock_next_cycle_propagates_queue_failure(tmp_path: Path) -> None:
 
     assert queue.register_calls
     assert len(queue.submit_restock_calls) == 1
-    assert order == ["jump-1", "queue-result"]
+    assert order == ["jump-1", "jump-2", "queue-result"]
     assert queue.deadlines == {}
 
 
@@ -849,36 +852,62 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
     assert failure_queue.deadlines == {}
 
 
-def test_restock_exceeding_remaining_cooldown_clamps_and_clears_deadline(
+def test_restock_exceeding_time_to_jump_clamps_countdown_to_zero(
     tmp_path: Path,
 ) -> None:
-    """Edge case: restock actual elapsed time exceeding remaining cooldown.
-
-    When restock takes longer than the remaining cooldown (and longer than
-    the 60s estimate), total_time must clamp safely to zero so no past-due
-    jump deadline is registered and no stale deadline remains in the map.
-
-    Uses a _SteppingClock so each time.monotonic() call advances 400s.
-    After the cooldown loop reaches total_time=300, the two monotonic calls
-    bracketing the restock are 400s apart — far exceeding both the 60s
-    estimate and the 300s remaining cooldown.
-    """
+    """Restock elapsed time can consume all time-to-jump without going negative."""
     clock = _SteppingClock(start=1000.0, step=400.0)
-    queue, _order = _run_restock_cycle(
+    monotonic_values = [
+        1000.0,
+        1400.0,
+        1800.0,
+        2200.0,
+        2200.0,
+        2200.0,
+        2600.0,
+        2600.0,
+        3000.0,
+        3400.0,
+    ]
+
+    def monotonic() -> float:
+        if monotonic_values:
+            return monotonic_values.pop(0)
+        return clock.now()
+
+    queue, order = _run_restock_cycle(
         tmp_path,
-        monotonic_side_effect=clock.now,
+        monotonic_side_effect=monotonic,
     )
 
-    # Exactly one register call (the initial 362s deadline before the
-    # cooldown loop).  The second register that normally happens after
-    # restock is skipped because total_time clamped to 0.
-    assert len(queue.register_calls) == 1
+    assert len(queue.submit_restock_calls) == 1
+    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert len(queue.register_calls) == 2
     assert queue.register_calls[0][0] == "slot-0"
-
-    # The pre-restock clear removed the deadline, and the clamped
-    # total_time prevented re-registration, so the map is clean.
+    assert queue.register_calls[1][0] == "slot-0"
     assert queue.deadlines == {}
     assert "slot-0" in queue.clear_calls
+
+
+def test_first_cycle_skips_restock(tmp_path: Path) -> None:
+    queue, order = _run_restock_cycle(
+        tmp_path,
+        route_list=["A"],
+        keyboard_interrupt_after=None,
+        expected_result=True,
+    )
+
+    assert order == ["jump-1"]
+    assert queue.submit_restock_calls == []
+    assert queue.deadlines == {}
+
+
+def test_restock_fires_after_plot_not_during_cooldown(tmp_path: Path) -> None:
+    queue, order = _run_restock_cycle(tmp_path)
+
+    assert len(queue.submit_restock_calls) == 1
+    assert order[:4] == ["jump-1", "jump-2", "queue-result", "restock"]
+    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
 
 
 # ---------------------------------------------------------------------------
@@ -2662,4 +2691,3 @@ class TestJumpsLeftResumeDisplay:
             f"Jump' at idx=2 must show 'Jumps remaining: 3'. "
             f"Got '{jumps_remaining_field}'."
         )
-
