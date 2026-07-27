@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -34,7 +35,12 @@ from PySide6.QtWidgets import QApplication, QDialog
 @pytest.fixture(autouse=True)
 def mock_qdialog_exec(monkeypatch):
     """Prevent QDialog.exec() from blocking in any test."""
-    monkeypatch.setattr(QDialog, "exec", lambda self: 1)
+    def close_dialog(dialog: QDialog) -> int:
+        _ = dialog.close()
+        QApplication.processEvents()
+        return 1
+
+    monkeypatch.setattr(QDialog, "exec", close_dialog)
 
 from TraversalSystem.gui_config import (
     CarrierSlotConfig,
@@ -44,7 +50,10 @@ from TraversalSystem.gui_config import (
     load_gui_config,
 )
 from TraversalSystem.gui.main_window import CTSMainWindow
-from TraversalSystem.gui.dashboard import DashboardWidget, DashboardSlotWidget
+from TraversalSystem.gui.dashboard import (
+    DashboardSlotWidget,
+    DashboardWidget,
+)
 from TraversalSystem.gui.worker_state import WorkerState
 from TraversalSystem.gui.binding_controller import (
     BindingController,
@@ -328,7 +337,9 @@ class TestStartAllBlockedNoReadySlots:
                 pass
 
         mock_wc = MockWC()
-        dashboard = DashboardWidget(config, bc, mock_wc)
+        dashboard = DashboardWidget(
+            config, bc, cast(WorkerController, cast(object, mock_wc))
+        )
 
         # All slots should show unbound status
         for idx, widget in dashboard.slot_widgets.items():
@@ -644,7 +655,9 @@ class TestManualBindingFlow:
                 pass
 
         mock_wc = MockWC()
-        dashboard = DashboardWidget(config, bc, mock_wc)
+        dashboard = DashboardWidget(
+            config, bc, cast(WorkerController, cast(object, mock_wc))
+        )
 
         # Set slot to NEEDS_MANUAL_BINDING state
         slot_widget = dashboard.slot_widgets[0]
