@@ -28,6 +28,7 @@ class _DoneSignal(Protocol):
 class _SubmissionHandle(Protocol[T_co]):
     slot_id: str
     deadline: float | None
+    not_before: float | None
     estimated_duration: float
     cancel_event: threading.Event
     done: _DoneSignal
@@ -61,8 +62,8 @@ def _contract_message() -> str:
         "TraversalSystem.sequence_queue with class SequenceQueue(*, time_fn=...) "
         "plus submit_jump_plot(slot_id, run, deadline, estimated_duration, "
         "cancel_event=None), submit_restock(slot_id, run, estimated_duration, "
-        "cancel_event=None, deadline=None), and shutdown(wait=True). Each submit "
-        "must return a handle exposing slot_id, deadline, estimated_duration, "
+        "cancel_event=None, deadline=None, not_before=None), and shutdown(wait=True). Each submit "
+        "must return a handle exposing slot_id, deadline, not_before, estimated_duration, "
         "cancel_event, done, and result(timeout=None)."
     )
 
@@ -116,10 +117,13 @@ def _assert_handle_contract(
     *,
     slot_id: str,
     deadline: float | None,
+    not_before: float | None,
     estimated_duration: float,
     cancel_event: threading.Event,
 ) -> _SubmissionHandle[object]:
-    for attribute in ("slot_id", "deadline", "estimated_duration", "cancel_event", "done"):
+    for attribute in (
+        "slot_id", "deadline", "not_before", "estimated_duration", "cancel_event", "done",
+    ):
         if not hasattr(handle, attribute):
             pytest.fail(_contract_message() + f" Submission handle is missing .{attribute}.")
     if not callable(getattr(handle, "result", None)):
@@ -127,6 +131,7 @@ def _assert_handle_contract(
 
     assert getattr(handle, "slot_id") == slot_id
     assert getattr(handle, "deadline") == deadline
+    assert getattr(handle, "not_before") == not_before
     assert getattr(handle, "estimated_duration") == estimated_duration
     assert getattr(handle, "cancel_event") is cancel_event
 
@@ -170,6 +175,7 @@ def _submit_jump_plot(
             handle,
             slot_id=slot_id,
             deadline=deadline,
+            not_before=None,
             estimated_duration=estimated_duration,
             cancel_event=event,
         ),
@@ -185,6 +191,7 @@ def _submit_restock(
     run: Callable[[], T],
     cancel_event: threading.Event | None = None,
     deadline: float | None = None,
+    not_before: float | None = None,
 ) -> _SubmissionHandle[T]:
     submit = getattr(queue, "submit_restock", None)
     if not callable(submit):
@@ -197,12 +204,13 @@ def _submit_restock(
             estimated_duration=estimated_duration,
             cancel_event=event,
             deadline=deadline,
+            not_before=not_before,
         )
     except TypeError as exc:
         pytest.fail(
             _contract_message()
             + " submit_restock must accept slot_id/run/estimated_duration/"
-            + f"cancel_event/deadline keywords. Got: {exc}"
+            + f"cancel_event/deadline/not_before keywords. Got: {exc}"
         )
     typed_handle = cast(
         _SubmissionHandle[T],
@@ -210,6 +218,7 @@ def _submit_restock(
             handle,
             slot_id=slot_id,
             deadline=deadline,
+            not_before=not_before,
             estimated_duration=estimated_duration,
             cancel_event=event,
         ),
@@ -400,6 +409,115 @@ def test_restock_fifo_when_feasible_before_next_jump_deadline() -> None:
         assert jump.done.wait(1.0)
         assert second_restock.done.wait(1.0)
         assert execution_order == ["active", "restock-1", "jump", "restock-2"]
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_restock_not_before_blocks_dispatch_without_jump_deadline() -> None:
+    clock = _ManualClock(start=100.0)
+    queue, _cancelled_error = _make_queue(clock)
+    started = threading.Event()
+
+    try:
+        handle = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=5.0,
+            not_before=clock.now() + 10.0,
+            run=lambda: started.set() or "restock",
+        )
+
+        assert started.wait(0.05) is False
+
+        clock.advance(10.0)
+        register_deadline = getattr(queue, "register_jump_deadline", None)
+        assert callable(register_deadline)
+        _ = register_deadline(slot_id="wake", deadline=clock.now() + 100.0)
+
+        assert started.wait(1.0)
+        assert handle.result(timeout=0.1) == "restock"
+    finally:
+        _shutdown_queue(queue)
+
+
+def test_long_restock_runs_after_current_jump_deadline_before_next_plot() -> None:
+    clock = _ManualClock(start=100.0)
+    queue, _cancelled_error = _make_queue(clock)
+    restock_started = threading.Event()
+    release_restock = threading.Event()
+    jump_started = threading.Event()
+    execution_order: list[str] = []
+
+    def restock() -> str:
+        execution_order.append("restock")
+        restock_started.set()
+        assert release_restock.wait(1.0)
+        return "restock"
+
+    def jump() -> str:
+        execution_order.append("jump")
+        jump_started.set()
+        return "jump"
+
+    register_deadline = getattr(queue, "register_jump_deadline", None)
+    assert callable(register_deadline)
+
+    try:
+        _ = register_deadline(slot_id="slot-next", deadline=clock.now() + 62.0)
+        restock_handle = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=90.0,
+            not_before=clock.now() + 60.0,
+            run=restock,
+        )
+
+        clock.advance(60.0)
+        assert restock_started.wait(0.05) is False
+
+        clock.advance(2.0)
+        jump_handle = _submit_jump_plot(
+            queue,
+            slot_id="slot-next",
+            deadline=clock.now(),
+            estimated_duration=30.0,
+            run=jump,
+        )
+
+        assert restock_started.wait(1.0)
+        assert jump_started.wait(0.05) is False
+        release_restock.set()
+        assert jump_started.wait(1.0)
+        assert restock_handle.result(timeout=0.1) == "restock"
+        assert jump_handle.result(timeout=0.1) == "jump"
+        assert execution_order == ["restock", "jump"]
+    finally:
+        release_restock.set()
+        _shutdown_queue(queue)
+
+
+def test_cancelled_restock_completes_before_not_before() -> None:
+    clock = _ManualClock(start=100.0)
+    queue, cancelled_error = _make_queue(clock)
+    cancel_event = threading.Event()
+    started = threading.Event()
+
+    try:
+        handle = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=5.0,
+            cancel_event=cancel_event,
+            not_before=clock.now() + 1000.0,
+            run=lambda: started.set() or "restock",
+        )
+
+        cancel_event.set()
+
+        assert handle.done.wait(1.5)
+        with pytest.raises(cancelled_error):
+            _ = handle.result(timeout=0.1)
+        assert started.is_set() is False
     finally:
         _shutdown_queue(queue)
 
@@ -819,7 +937,6 @@ def test_concurrent_carrier_submissions_preserve_serialization() -> None:
             handles.append(h)
 
         first_started = False
-        deadline_check = 1.0
         for _ in range(20):
             if any(ev.is_set() for ev in started_events):
                 first_started = True
@@ -859,24 +976,24 @@ def test_stale_deadline_pruning_prevents_indefinite_restock_starvation() -> None
         pytest.fail("SequenceQueue must expose can_start_restock and register_jump_deadline")
 
     try:
-        register_deadline(slot_id="slot-1", deadline=clock.now() + 30.0)
+        _ = register_deadline(slot_id="slot-1", deadline=clock.now() + 30.0)
         assert can_start_restock(estimated_duration=60.0) is False
 
         clock.advance(40.0)
         assert can_start_restock(estimated_duration=60.0) is True
 
-        register_deadline(slot_id="slot-2", deadline=clock.now() + 20.0)
+        _ = register_deadline(slot_id="slot-2", deadline=clock.now() + 20.0)
         assert can_start_restock(estimated_duration=60.0) is False
 
         clock.advance(30.0)
         assert can_start_restock(estimated_duration=60.0) is True
 
-        register_deadline(slot_id="slot-3", deadline=clock.now() + 100.0)
+        _ = register_deadline(slot_id="slot-3", deadline=clock.now() + 100.0)
         assert can_start_restock(estimated_duration=200.0) is False
         assert can_start_restock(estimated_duration=10.0) is True
 
         if callable(clear_deadline):
-            clear_deadline(slot_id="slot-3")
+            _ = clear_deadline(slot_id="slot-3")
         assert can_start_restock(estimated_duration=60.0) is True
     finally:
         _shutdown_queue(queue)

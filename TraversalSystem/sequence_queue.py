@@ -23,6 +23,7 @@ class CancelledBlockError(CancelledError):
 class SubmissionHandle(Generic[T]):
     slot_id: str
     deadline: float | None
+    not_before: float | None
     estimated_duration: float
     cancel_event: threading.Event
     done: threading.Event = field(default_factory=threading.Event)
@@ -123,6 +124,7 @@ class SequenceQueue:
             slot_id=slot_id,
             run=run,
             deadline=deadline,
+            not_before=None,
             estimated_duration=estimated_duration,
             cancel_event=cancel_event,
         )
@@ -135,12 +137,14 @@ class SequenceQueue:
         estimated_duration: float,
         cancel_event: threading.Event | None = None,
         deadline: float | None = None,
+        not_before: float | None = None,
     ) -> SubmissionHandle[T]:
         return self._submit(
             kind="restock",
             slot_id=slot_id,
             run=run,
             deadline=deadline,
+            not_before=not_before,
             estimated_duration=estimated_duration,
             cancel_event=cancel_event,
         )
@@ -259,12 +263,14 @@ class SequenceQueue:
         slot_id: str,
         run: Callable[[], T],
         deadline: float | None,
+        not_before: float | None,
         estimated_duration: float,
         cancel_event: threading.Event | None,
     ) -> SubmissionHandle[T]:
         handle = SubmissionHandle[T](
             slot_id=slot_id,
             deadline=deadline,
+            not_before=not_before,
             estimated_duration=estimated_duration,
             cancel_event=cancel_event or threading.Event(),
         )
@@ -414,6 +420,9 @@ class SequenceQueue:
         restock: _PendingBlock[object],
         jump_deadline: float | None,
     ) -> bool:
+        now = self._time_fn()
+        if restock.handle.not_before is not None and now < restock.handle.not_before:
+            return False
         if jump_deadline is None:
             return True
-        return self._time_fn() + restock.handle.estimated_duration < jump_deadline
+        return now + restock.handle.estimated_duration < jump_deadline
