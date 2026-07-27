@@ -566,7 +566,9 @@ class _FakeSequenceQueue:
         self.deadlines: dict[str, float] = {}
         self.register_calls: list[tuple[str, float]] = []
         self.clear_calls: list[str] = []
-        self.submit_restock_calls: list[tuple[str, float, threading.Event | None]] = []
+        self.submit_restock_calls: list[
+            tuple[str, float, threading.Event | None, float | None]
+        ] = []
         self._restock_failure: BaseException | None = restock_failure
         self._before_result: Callable[[], None] | None = before_result
 
@@ -586,22 +588,41 @@ class _FakeSequenceQueue:
         estimated_duration: float,
         cancel_event: threading.Event | None = None,
         deadline: float | None = None,
+        not_before: float | None = None,
     ) -> object:
         _ = deadline
-        self.submit_restock_calls.append((slot_id, estimated_duration, cancel_event))
+        self.submit_restock_calls.append(
+            (slot_id, estimated_duration, cancel_event, not_before)
+        )
 
         queue = self
 
         class _Handle:
+            def __init__(self) -> None:
+                self.done = threading.Event()
+                self._result: object | None = None
+                self._failure: BaseException | None = None
+
             def result(self, timeout: float | None = None) -> object:
                 _ = timeout
-                if queue._before_result is not None:
-                    queue._before_result()
-                if queue._restock_failure is not None:
-                    raise queue._restock_failure
-                return run()
+                if self._failure is not None:
+                    raise self._failure
+                return self._result
 
-        return _Handle()
+            def cancel(self) -> None:
+                if cancel_event is not None:
+                    cancel_event.set()
+                self.done.set()
+
+        handle = _Handle()
+        if queue._before_result is not None:
+            queue._before_result()
+        if queue._restock_failure is not None:
+            handle._failure = queue._restock_failure
+        else:
+            handle._result = run()
+        handle.done.set()
+        return handle
 
 
 class _FakeResHandler:
@@ -731,15 +752,20 @@ def _run_restock_cycle(
     return queue, order
 
 
-def test_restock_queue_submission_blocks_until_queue_completion(tmp_path: Path) -> None:
+def test_restock_queue_submission_returns_completed_handle(tmp_path: Path) -> None:
     queue, order = _run_restock_cycle(tmp_path)
     expected_duration = 30.0 + 0.05 * 40
 
     assert queue.register_calls
-    assert len(queue.submit_restock_calls) == 1
+    assert len(queue.submit_restock_calls) == 2
     assert queue.submit_restock_calls[0][0:2] == ("slot-0", expected_duration)
     assert queue.submit_restock_calls[0][2] is not None
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert queue.submit_restock_calls[0][3] is not None
+    assert order == [
+        "jump-1", "queue-result", "restock",
+        "jump-2", "queue-result", "restock",
+        "jump-3",
+    ]
     assert queue.deadlines == {}
 
 
@@ -751,7 +777,7 @@ def test_restock_next_cycle_propagates_queue_failure(tmp_path: Path) -> None:
 
     assert queue.register_calls
     assert len(queue.submit_restock_calls) == 1
-    assert order == ["jump-1", "jump-2", "queue-result"]
+    assert order == ["jump-1", "queue-result"]
     assert queue.deadlines == {}
 
 
@@ -852,39 +878,21 @@ def test_deadline_and_restock_cleanup_on_completion_stop_and_failure(
     assert failure_queue.deadlines == {}
 
 
-def test_restock_exceeding_time_to_jump_clamps_countdown_to_zero(
+def test_restock_not_before_is_derived_without_changing_jump_countdown(
     tmp_path: Path,
 ) -> None:
-    """Restock elapsed time can consume all time-to-jump without going negative."""
-    clock = _SteppingClock(start=1000.0, step=400.0)
-    monotonic_values = [
-        1000.0,
-        1400.0,
-        1800.0,
-        2200.0,
-        2200.0,
-        2200.0,
-        2600.0,
-        2600.0,
-        3000.0,
-        3400.0,
+    """Restock scheduling does not consume or mutate the plotted jump countdown."""
+    queue, order = _run_restock_cycle(tmp_path)
+
+    assert len(queue.submit_restock_calls) == 2
+    assert all(call[3] is not None for call in queue.submit_restock_calls)
+    assert order == [
+        "jump-1", "queue-result", "restock",
+        "jump-2", "queue-result", "restock",
+        "jump-3",
     ]
-
-    def monotonic() -> float:
-        if monotonic_values:
-            return monotonic_values.pop(0)
-        return clock.now()
-
-    queue, order = _run_restock_cycle(
-        tmp_path,
-        monotonic_side_effect=monotonic,
-    )
-
-    assert len(queue.submit_restock_calls) == 1
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
-    assert len(queue.register_calls) == 2
-    assert queue.register_calls[0][0] == "slot-0"
-    assert queue.register_calls[1][0] == "slot-0"
+    assert len(queue.register_calls) >= 2
+    assert all(call[0] == "slot-0" for call in queue.register_calls)
     assert queue.deadlines == {}
     assert "slot-0" in queue.clear_calls
 
@@ -902,12 +910,16 @@ def test_first_cycle_skips_restock(tmp_path: Path) -> None:
     assert queue.deadlines == {}
 
 
-def test_restock_fires_after_plot_not_during_cooldown(tmp_path: Path) -> None:
+def test_restock_is_scheduled_after_jump_confirmation(tmp_path: Path) -> None:
     queue, order = _run_restock_cycle(tmp_path)
 
-    assert len(queue.submit_restock_calls) == 1
-    assert order[:4] == ["jump-1", "jump-2", "queue-result", "restock"]
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert len(queue.submit_restock_calls) == 2
+    assert order[:3] == ["jump-1", "queue-result", "restock"]
+    assert order == [
+        "jump-1", "queue-result", "restock",
+        "jump-2", "queue-result", "restock",
+        "jump-3",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2293,7 +2305,7 @@ class TestJumpCancellationHandling:
              patch.object(main, "restock_tritium"), \
              patch.object(main, "os", **{"_exit": MagicMock(side_effect=SystemExit(2))}), \
              patch.object(main, "time") as fake_time:
-            fake_time.monotonic.side_effect = time.monotonic
+            fake_time.monotonic.side_effect = clock.now
             fake_time.sleep.side_effect = lambda _s: None
             result = main._run_traversal_slot(context)
 

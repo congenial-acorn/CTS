@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import datetime
 import importlib
-from concurrent.futures import TimeoutError as QueueTimeoutError
 import sys
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -458,7 +457,9 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
         lambda timeout=None: clock.advance(float(timeout or 0.0)) or False
     )
     jump_calls: list[dict[str, object]] = []
+    restock_calls: list[dict[str, object]] = []
     registered_deadlines: list[float] = []
+    cleared_deadlines: list[str] = []
 
     def fake_run_coordinated_jump_plot(
         *,
@@ -482,6 +483,13 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
         assert slot_id == "slot-0"
         registered_deadlines.append(deadline)
 
+    def record_restock(**kwargs: object) -> None:
+        assert cleared_deadlines == []
+        restock_calls.append(kwargs)
+
+    def record_clear(_sequence_queue: object, *, slot_id: str) -> None:
+        cleared_deadlines.append(slot_id)
+
     with patch("builtins.print"), \
          patch.object(main, "DiscordHandler", return_value=MagicMock()), \
          patch.object(main, "Reshandler", _FakeResHandler), \
@@ -491,9 +499,9 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
          patch.object(main.time, "monotonic", side_effect=clock.now), \
          patch.object(main.time, "sleep", side_effect=clock.advance), \
          patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
-         patch.object(main, "_run_coordinated_restock"), \
+         patch.object(main, "_run_coordinated_restock", side_effect=record_restock), \
          patch.object(main, "_register_jump_deadline", side_effect=record_deadline), \
-         patch.object(main, "_clear_jump_deadline"):
+         patch.object(main, "_clear_jump_deadline", side_effect=record_clear):
         assert main._run_traversal_slot(runtime_context) is True
 
     assert [call["system_name"] for call in jump_calls] == ["Sol", "Achenar"]
@@ -501,6 +509,12 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     assert registered_deadlines
     assert jump_calls[1]["deadline"] == pytest.approx(registered_deadlines[-1])
     assert cast(float, jump_calls[1]["deadline"]) < cast(float, jump_calls[1]["seen_at"])
+    assert len(restock_calls) == 1
+    assert restock_calls[0]["queue_slot_id"] == "slot-0"
+    assert restock_calls[0]["not_before"] == pytest.approx(
+        cast(float, jump_calls[0]["seen_at"]) + 6.0 + main.RESTOCK_TRIGGER_REMAINING_SECONDS
+    )
+    assert cleared_deadlines
 
 
 def test_concurrent_auto_jump_plot_serializes_queue_blocks(tmp_path: Path) -> None:
@@ -680,7 +694,7 @@ def test_retry_failed_jump_submits_separate_queue_blocks(tmp_path: Path) -> None
         _ = focus_handler
         attempts += 1
         executed_systems.append(system_name)
-        if attempts == 1:
+        if attempts <= 3:
             return 0, 0
         raise KeyboardInterrupt
 
@@ -702,8 +716,8 @@ def test_retry_failed_jump_submits_separate_queue_blocks(tmp_path: Path) -> None
          patch.object(main, "jump_to_system", side_effect=fake_jump_to_system):
         assert main._run_traversal_slot(runtime_context) is False
 
-    assert executed_systems == ["Sol", "Sol"]
-    assert len(queue.submit_jump_plot_calls) == 2
+    assert executed_systems == ["Sol", "Sol", "Sol"]
+    assert len(queue.submit_jump_plot_calls) == 3
     assert all(call["slot_id"] == "slot-0" for call in queue.submit_jump_plot_calls)
     assert all(
         call["estimated_duration"] == main.DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS
@@ -791,10 +805,11 @@ def test_coordinated_restock_passes_dynamic_estimate_to_queue(tmp_path: Path) ->
     options = _make_options(tmp_path)
     options.tritium_slot = 200
     queue = MagicMock()
-    queue.submit_restock.return_value = MagicMock()
+    pending_handle = MagicMock()
+    queue.submit_restock.return_value = pending_handle
 
     with patch.object(main, "restock_tritium"):
-        main._run_coordinated_restock(
+        result = main._run_coordinated_restock(
             sequence_queue=queue,
             queue_slot_id="slot-0",
             cancel_event=threading.Event(),
@@ -802,9 +817,12 @@ def test_coordinated_restock_passes_dynamic_estimate_to_queue(tmp_path: Path) ->
             options=options,
             sequence_dir=tmp_path,
             focus_handler=None,
+            not_before=1234.0,
         )
 
+    assert result is pending_handle
     queue.submit_restock.assert_called_once()
+    assert queue.submit_restock.call_args.kwargs["not_before"] == 1234.0
     submitted_duration = queue.submit_restock.call_args.kwargs["estimated_duration"]
     expected = (
         main.RESTOCK_FIXED_OVERHEAD_SECONDS
@@ -814,6 +832,7 @@ def test_coordinated_restock_passes_dynamic_estimate_to_queue(tmp_path: Path) ->
     )
     assert submitted_duration == pytest.approx(expected)
     assert submitted_duration != main.DEFAULT_RESTOCK_ESTIMATE_SECONDS
+    pending_handle.result.assert_not_called()
 
 
 def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Path) -> None:
@@ -823,7 +842,7 @@ def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Pat
     queue = MagicMock()
     queue.submit_restock.return_value = MagicMock()
 
-    main._run_coordinated_restock(
+    result = main._run_coordinated_restock(
         sequence_queue=queue,
         queue_slot_id="slot-0",
         cancel_event=threading.Event(),
@@ -831,49 +850,47 @@ def test_coordinated_restock_skipped_when_auto_plot_jumps_disabled(tmp_path: Pat
         options=options,
         sequence_dir=tmp_path,
         focus_handler=None,
+        not_before=1234.0,
     )
 
+    assert result is None
     queue.submit_restock.assert_not_called()
 
 
-def test_coordinated_restock_skips_on_queue_timeout(tmp_path: Path) -> None:
+def test_coordinated_restock_returns_pending_handle_without_waiting(tmp_path: Path) -> None:
     main = _load_main_with_mocks(tmp_path)
     options = _make_options(tmp_path)
-
-    # Inject runtime_context EXACTLY as production does (not None), so the
-    # restock cancel event is the worker's own cancel_event iff the (buggy)
-    # aliasing is present. This is the regression guard for Bug A: a queue
-    # timeout must skip the restock WITHOUT setting the worker's cancel event.
-    runtime_context = SimpleNamespace(cancel_event=threading.Event())
+    runtime_context = _RuntimeContextStub()
     captured: dict[str, threading.Event] = {}
 
-    class _TimeoutHandle:
-        def result(self, timeout: float | None = None) -> object:
-            # Mimic a queue that never executes the block: consume the wait
-            # slice, then report a timeout so the wait budget is exhausted.
-            time.sleep(timeout or 0)
-            raise QueueTimeoutError
+    class _PendingHandle:
+        def __init__(self) -> None:
+            self.done = threading.Event()
 
-        def cancel(self) -> None:  # pragma: no cover
-            raise AssertionError(
-                "handle.cancel() must not be used to skip a restock — it aliases "
-                "the queue's cancel event and would stop the whole slot (Bug A)."
-            )
+        def result(self, timeout: float | None = None) -> object:
+            _ = timeout
+            raise AssertionError("asynchronous submission must not wait for result")
+
+        def cancel(self) -> None:
+            captured["cancel_event"].set()
+
+    pending_handle = _PendingHandle()
 
     def _submit_restock(
         *, slot_id: str, run: Callable[[], object],
         estimated_duration: float, cancel_event: threading.Event,
+        not_before: float,
     ) -> object:
+        _ = slot_id, run, estimated_duration
+        assert not_before == 1234.0
         captured["cancel_event"] = cancel_event
-        return _TimeoutHandle()
+        return pending_handle
 
     queue = MagicMock()
     queue.submit_restock.side_effect = _submit_restock
 
-    with patch("builtins.print") as print_mock, \
-            patch.object(main, "restock_tritium"), \
-            patch.object(main, "RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS", 0.3):
-        main._run_coordinated_restock(
+    with patch.object(main, "restock_tritium"):
+        result = main._run_coordinated_restock(
             sequence_queue=queue,
             queue_slot_id="slot-0",
             cancel_event=threading.Event(),
@@ -881,61 +898,16 @@ def test_coordinated_restock_skips_on_queue_timeout(tmp_path: Path) -> None:
             options=options,
             sequence_dir=tmp_path,
             focus_handler=None,
+            not_before=1234.0,
         )
 
-    # The worker's own cancel event must stay UNSET so the slot keeps running.
+    assert result is pending_handle
     assert runtime_context.cancel_event.is_set() is False
-    # A DEDICATED restock event (not the worker event) was passed and cancelled.
     assert captured["cancel_event"] is not runtime_context.cancel_event
-    assert captured["cancel_event"].is_set() is True
+    assert captured["cancel_event"].is_set() is False
     queue.submit_restock.assert_called_once()
-    printed = " ".join(str(call.args[0]) for call in print_mock.call_args_list)
-    assert "deferred" in printed
-    assert "timeout" in printed
-
-
-def test_coordinated_restock_stops_promptly_on_user_stop(tmp_path: Path) -> None:
-    """A genuine user Stop during a deferred restock wait is still honored:
-    the worker cancel event propagates one-way into the restock event and the
-    helper returns promptly (it does not block for the full queue timeout)."""
-    main = _load_main_with_mocks(tmp_path)
-    options = _make_options(tmp_path)
-
-    runtime_context = SimpleNamespace(cancel_event=threading.Event())
-    runtime_context.cancel_event.set()  # user pressed Stop
-    captured: dict[str, threading.Event] = {}
-
-    class _NeverHandle:
-        def result(self, timeout: float | None = None) -> object:
-            raise QueueTimeoutError
-
-    def _submit_restock(
-        *, slot_id: str, run: Callable[[], object],
-        estimated_duration: float, cancel_event: threading.Event,
-    ) -> object:
-        captured["cancel_event"] = cancel_event
-        return _NeverHandle()
-
-    queue = MagicMock()
-    queue.submit_restock.side_effect = _submit_restock
-
-    started = time.monotonic()
-    with patch.object(main, "restock_tritium"), \
-            patch.object(main, "RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS", 180.0):
-        main._run_coordinated_restock(
-            sequence_queue=queue,
-            queue_slot_id="slot-0",
-            cancel_event=threading.Event(),
-            runtime_context=runtime_context,
-            options=options,
-            sequence_dir=tmp_path,
-            focus_handler=None,
-        )
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 1.0  # returned promptly, not after the 180s timeout
-    assert captured["cancel_event"].is_set() is True  # restock cancelled
-    assert captured["cancel_event"] is not runtime_context.cancel_event
+    pending_handle.cancel()
+    assert captured["cancel_event"].is_set() is True
 
 
 def test_first_cycle_deadline_is_deterministic_slot_order(tmp_path: Path) -> None:

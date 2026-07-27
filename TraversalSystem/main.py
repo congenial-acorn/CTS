@@ -9,7 +9,6 @@ import random
 import threading
 import time
 from collections.abc import Mapping
-from concurrent.futures import CancelledError as QueueCancelledError, TimeoutError as QueueTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Protocol, Tuple, cast
@@ -78,8 +77,8 @@ RESTOCK_INPUTS_FIXED = 40
 """Conservative count of focus-gated input primitives across restock_fc/open_cargo_transfer/restock_cargo sequences."""
 RESTOCK_INPUTS_PER_SLOT = 2
 """Navigation keypresses per tritium slot."""
-RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS = 180.0
-"""Upper bound on waiting for the shared queue to execute a restock block. Prevents indefinite worker stall under sustained cross-carrier queue contention; on timeout the restock is skipped for this cycle and retried next cooldown."""
+MAX_JUMP_PLOT_ATTEMPTS = 3
+"""Maximum total attempts to plot one jump before the slot stops with its route position preserved."""
 FIRST_CYCLE_SLOT_ORDER_OFFSET_SECONDS = 0.001
 """Tiny per-slot deadline offset seeded into the first-cycle jump-plot deadline so the SequenceQueue (deadline, sequence) sort resolves to slot-index order on the first jump. Smaller than the ~10 s startup wait, large enough to break deadline ties deterministically."""
 JOURNAL_CONFIRMATION_TIMEOUT_SECONDS = 300.0
@@ -142,6 +141,8 @@ class InputHandlerAdapter(Protocol):
 
 
 class SubmissionHandleAdapter(Protocol):
+    done: threading.Event
+
     def result(self, timeout: float | None = None) -> object: ...
     def cancel(self) -> object: ...
 
@@ -647,47 +648,41 @@ def _run_coordinated_restock(
     options: TraversalOptions,
     sequence_dir: Path,
     focus_handler: InputHandlerAdapter | None,
-) -> None:
-    """Run a coordinated tritium restock sequence through the queue.
+    not_before: float,
+) -> SubmissionHandleAdapter | None:
+    """Submit a tritium restock without blocking the traversal worker.
 
-    This helper serializes the restock action to prevent input conflicts.
-    Worker threads remain concurrent.
-    Automation blocks (jump/restock) are serialized.
-    Retries stay outside queue blocks.
+    Queued restocks become eligible five minutes after the plotted departure.
+    Single-carrier fallbacks wait locally until the same eligibility boundary.
     """
     if options.disable_refuel or not options.auto_plot_jumps:
-        return
-    if sequence_queue is None or queue_slot_id is None:
-        restock_tritium(
-            options,
-            sequence_dir,
-            focus_handler=focus_handler,
-            runtime_context=runtime_context,
-        )
-        return
+        return None
 
     submit_restock = getattr(sequence_queue, "submit_restock", None)
-    if not callable(submit_restock):
+    if sequence_queue is None or queue_slot_id is None or not callable(submit_restock):
+        wait_seconds = max(0.0, not_before - time.monotonic())
+        if wait_seconds > 0:
+            _wait_for_duration(
+                wait_seconds,
+                runtime_context=runtime_context,
+                randomize=False,
+            )
+        if cancel_event.is_set():
+            return None
         restock_tritium(
             options,
             sequence_dir,
             focus_handler=focus_handler,
             runtime_context=runtime_context,
         )
-        return
+        return None
 
-    # The restock block gets its OWN cancel event. It must never alias the
-    # worker's cancel_event: SubmissionHandle.cancel() (called on queue timeout
-    # or shutdown) sets the event it holds, so aliasing the worker event would
-    # turn a *deferred restock skip* into a *whole-slot stop* (Bug A). A genuine
-    # user Stop is still honored by polling the worker event in the wait loop
-    # below and propagating it one-way into the restock event.
-    worker_cancel_event = (
-        runtime_context.cancel_event if runtime_context is not None else cancel_event
-    )
+    # Queue cancellation must remain independent from the slot cancellation
+    # event. The running restock still observes genuine user Stop through its
+    # runtime context.
     restock_cancel_event = threading.Event()
 
-    handle = cast(
+    return cast(
         SubmissionHandleAdapter,
         submit_restock(
             slot_id=queue_slot_id,
@@ -699,36 +694,9 @@ def _run_coordinated_restock(
             ),
             estimated_duration=estimate_restock_duration(options.tritium_slot),
             cancel_event=restock_cancel_event,
+            not_before=not_before,
         ),
     )
-
-    wait_deadline = time.monotonic() + RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS
-    while True:
-        if worker_cancel_event.is_set():
-            # Genuine user Stop: cancel only the deferred restock and return.
-            # The caller's next runtime wait raises TraversalStopped, stopping
-            # the slot cleanly — we must NOT stop it from here.
-            restock_cancel_event.set()
-            return
-        remaining = wait_deadline - time.monotonic()
-        if remaining <= 0:
-            print(
-                "Restock deferred: shared queue contention exceeded "
-                f"{RESTOCK_QUEUE_WAIT_TIMEOUT_SECONDS:.0f}s timeout. "
-                "Skipping restock this cycle; will retry on the next cooldown."
-            )
-            restock_cancel_event.set()  # cancels only this restock, not the slot
-            return
-        try:
-            # Short poll slices so a user Stop is observed promptly instead of
-            # blocking for the full queue-wait timeout.
-            _ = handle.result(timeout=min(remaining, 0.5))
-            return
-        except QueueTimeoutError:
-            continue
-        except QueueCancelledError:
-            # Block cancelled externally (e.g. queue shutdown); nothing to do.
-            return
 
 
 def handle_critical_error(
@@ -808,6 +776,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
     registered_jump_deadline = False
     next_jump_plot_deadline: float | None = None
     cooldown_deadline: float | None = None
+    pending_restock: SubmissionHandleAdapter | None = None
     queue_slot_id = f"slot-{slot_id}" if slot_id is not None else None
 
     def maybe_save_progress() -> None:
@@ -841,6 +810,13 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             deadline=next_jump_plot_deadline,
         )
         registered_jump_deadline = True
+
+    def reap_pending_restock() -> None:
+        nonlocal pending_restock
+        if pending_restock is None or not pending_restock.done.is_set():
+            return
+        _ = pending_restock.result(timeout=0)
+        pending_restock = None
 
     def _handle_jump_cancelled(system_name: str, *, revert_index: bool) -> bool:
         nonlocal progress_saved
@@ -910,6 +886,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         for idx, system in enumerate(route_list):
             clear_registered_jump_deadline()
             total_time = 0
+            restock_not_before: float | None = None
             if idx < state.line_no:
                 continue
             jumps_left -= 1
@@ -924,9 +901,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
 
             try:
+                reap_pending_restock()
                 time_to_jump = 0
                 departing_time: datetime.datetime | int = 0
-                while time_to_jump == 0 or departing_time == 0:
+                for _attempt in range(MAX_JUMP_PLOT_ATTEMPTS):
                     runtime_context.raise_if_cancelled()
                     jump_plot_deadline = None
                     if options.auto_plot_jumps:
@@ -947,8 +925,21 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                         focus_handler=focus_dependency,
                         deadline=jump_plot_deadline,
                     )
+                    if time_to_jump != 0 and departing_time != 0:
+                        break
+                else:
+                    print(
+                        f"Unable to plot jump to {system} after {MAX_JUMP_PLOT_ATTEMPTS} attempts. Saving progress and stopping slot."
+                    )
+                    return False
+                reap_pending_restock()
                 assert isinstance(departing_time, datetime.datetime)
                 next_jump_plot_deadline = None
+                restock_not_before = (
+                    time.monotonic()
+                    + time_to_jump
+                    + RESTOCK_TRIGGER_REMAINING_SECONDS
+                )
 
                 formatted_time = str(datetime.timedelta(seconds=time_to_jump))
                 departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
@@ -958,21 +949,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 )
 
                 journal.reset_jump()
-
-                if done_first:
-                    print("Submitting tritium restock to shared queue...")
-                    restock_started_at = time.monotonic()
-                    _run_coordinated_restock(
-                        sequence_queue=sequence_queue,
-                        queue_slot_id=queue_slot_id,
-                        cancel_event=runtime_context.cancel_event,
-                        runtime_context=runtime_context,
-                        options=options,
-                        sequence_dir=SEQUENCE_DIR,
-                        focus_handler=focus_dependency,
-                    )
-                    restock_elapsed = time.monotonic() - restock_started_at
-                    time_to_jump = max(0, time_to_jump - int(restock_elapsed))
 
                 total_time = max(0, time_to_jump - 6)
 
@@ -1139,11 +1115,24 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     print("Jump complete!")
                     runtime_context.transition("running")
                     discord_messenger.update_fields(8, 7)
-                    clear_registered_jump_deadline()
+                    if idx + 1 < len(route_list):
+                        assert restock_not_before is not None
+                        reap_pending_restock()
+                        if pending_restock is None:
+                            print("Scheduling tritium restock for five minutes after jump...")
+                            pending_restock = _run_coordinated_restock(
+                                sequence_queue=sequence_queue,
+                                queue_slot_id=queue_slot_id,
+                                cancel_event=runtime_context.cancel_event,
+                                runtime_context=runtime_context,
+                                options=options,
+                                sequence_dir=SEQUENCE_DIR,
+                                focus_handler=focus_dependency,
+                                not_before=restock_not_before,
+                            )
 
                 runtime_context.wait(1)
             print()
-            clear_registered_jump_deadline()
             runtime_context.transition("running")
             discord_messenger.update_fields(9, 9)
 
@@ -1181,6 +1170,8 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         maybe_save_progress()
         raise
     finally:
+        if pending_restock is not None and not pending_restock.done.is_set():
+            _ = pending_restock.cancel()
         clear_registered_jump_deadline()
         maybe_save_progress()
 
