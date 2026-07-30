@@ -441,9 +441,16 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     journal.reset_cancel.return_value = None
     journal.jump_cancelled.return_value = False
     journal.has_jumped.return_value = True
+    wall_clock = datetime.datetime(2999, 1, 1, 0, 1, tzinfo=datetime.timezone.utc)
+
+    class _FixedDateTime(datetime.datetime):
+        @classmethod
+        def now(cls, tz: datetime.tzinfo | None = None) -> datetime.datetime:
+            return wall_clock if tz is not None else wall_clock.replace(tzinfo=None)
+
     departures = {
-        "Sol": datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc),
-        "Achenar": datetime.datetime(2999, 1, 2, tzinfo=datetime.timezone.utc),
+        "Sol": _FixedDateTime(2999, 1, 1, tzinfo=datetime.timezone.utc),
+        "Achenar": _FixedDateTime(2999, 1, 1, tzinfo=datetime.timezone.utc),
     }
     queue = object()
     runtime_context = _make_runtime_context(
@@ -459,6 +466,7 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     jump_calls: list[dict[str, object]] = []
     restock_calls: list[dict[str, object]] = []
     registered_deadlines: list[float] = []
+    registered_remaining: list[float] = []
     cleared_deadlines: list[str] = []
 
     def fake_run_coordinated_jump_plot(
@@ -482,10 +490,10 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     ) -> None:
         assert slot_id == "slot-0"
         registered_deadlines.append(deadline)
+        registered_remaining.append(deadline - clock.now())
 
     def record_restock(**kwargs: object) -> None:
-        assert cleared_deadlines == []
-        restock_calls.append(kwargs)
+        restock_calls.append({**kwargs, "submitted_at": clock.now()})
 
     def record_clear(_sequence_queue: object, *, slot_id: str) -> None:
         cleared_deadlines.append(slot_id)
@@ -496,6 +504,7 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
          patch.object(main, "load_route_list", return_value=["Sol", "Achenar"]), \
          patch.object(main, "_find_newest_journal", return_value=tmp_path / "Journal.log"), \
          patch.object(main, "consume_save", return_value=None), \
+         patch.object(main.datetime, "datetime", _FixedDateTime), \
          patch.object(main.time, "monotonic", side_effect=clock.now), \
          patch.object(main.time, "sleep", side_effect=clock.advance), \
          patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
@@ -507,12 +516,16 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     assert [call["system_name"] for call in jump_calls] == ["Sol", "Achenar"]
     assert jump_calls[0]["deadline"] == pytest.approx(jump_calls[0]["seen_at"])
     assert registered_deadlines
+    assert registered_remaining == [pytest.approx(240.0)]
     assert jump_calls[1]["deadline"] == pytest.approx(registered_deadlines[-1])
     assert cast(float, jump_calls[1]["deadline"]) < cast(float, jump_calls[1]["seen_at"])
     assert len(restock_calls) == 1
     assert restock_calls[0]["queue_slot_id"] == "slot-0"
+    assert restock_calls[0]["submitted_at"] == pytest.approx(
+        cast(float, jump_calls[1]["seen_at"])
+    )
     assert restock_calls[0]["not_before"] == pytest.approx(
-        cast(float, jump_calls[0]["seen_at"]) + 6.0 + main.RESTOCK_TRIGGER_REMAINING_SECONDS
+        cast(float, restock_calls[0]["submitted_at"])
     )
     assert cleared_deadlines
 
@@ -1072,7 +1085,7 @@ def test_traversal_slot_skips_restock_on_final_route_element(tmp_path: Path) -> 
     journal.reset_jump.return_value = None
     journal.jump_cancelled.return_value = False
     journal.has_jumped.return_value = True
-    departure = datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc)
+    departure = datetime.datetime.now(datetime.timezone.utc)
     runtime_context = _make_runtime_context(
         options=options,
         sequence_queue=object(),
@@ -1110,7 +1123,7 @@ def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:
     journal.reset_cancel.return_value = None
     journal.jump_cancelled.return_value = False
     journal.has_jumped.return_value = False
-    departure = datetime.datetime(2999, 1, 1, tzinfo=datetime.timezone.utc)
+    departure = datetime.datetime.now(datetime.timezone.utc)
     queue = object()
     runtime_context = _make_runtime_context(
         options=options,
@@ -1146,6 +1159,6 @@ def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:
 def test_timing_constants_are_documented_and_correct(tmp_path: Path) -> None:
     main = _load_main_with_mocks(tmp_path)
 
-    assert main.CARRIER_COOLDOWN_SECONDS == 362
+    assert main.CARRIER_COOLDOWN_SECONDS == 300
     assert main.RESTOCK_TRIGGER_REMAINING_SECONDS == 300
     assert main.ESTIMATED_CYCLE_SECONDS == 1320

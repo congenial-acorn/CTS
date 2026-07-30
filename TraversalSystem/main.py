@@ -63,10 +63,10 @@ SEQUENCE_DIR = BASE_DIR / "sequences"
 SAVE_PATH = BASE_DIR / "save.txt"
 DEFAULT_JUMP_PLOT_ESTIMATE_SECONDS = 30.0
 DEFAULT_RESTOCK_ESTIMATE_SECONDS = 60.0
-CARRIER_COOLDOWN_SECONDS = 362
-"""Elite Dangerous carrier jump cooldown: 6 min + 2 s buffer for journal/server confirmation latency."""
+CARRIER_COOLDOWN_SECONDS = 300
+"""Elite Dangerous carrier cooldown measured from the journal departure time."""
 RESTOCK_TRIGGER_REMAINING_SECONDS = 300
-"""Trigger the jump-confirmation gate when 5 minutes REMAIN on the cooldown clock. The coordinated restock now fires immediately after a successful post-plot lockout (skip the first plotted jump)."""
+"""Trigger the jump-confirmation gate when 5 minutes remain on the cooldown clock. Restocking happens immediately after the next successful plot."""
 ESTIMATED_CYCLE_SECONDS = 1320
 """Estimated wall-clock seconds per jump cycle, used for arrival-time ETA (22 min)."""
 RESTOCK_FIXED_OVERHEAD_SECONDS = 30.0
@@ -652,8 +652,7 @@ def _run_coordinated_restock(
 ) -> SubmissionHandleAdapter | None:
     """Submit a tritium restock without blocking the traversal worker.
 
-    Queued restocks become eligible five minutes after the plotted departure.
-    Single-carrier fallbacks wait locally until the same eligibility boundary.
+    Restocks become eligible immediately after the successful plot that submits them.
     """
     if options.disable_refuel or not options.auto_plot_jumps:
         return None
@@ -798,10 +797,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             _clear_jump_deadline(sequence_queue, slot_id=queue_slot_id)
         registered_jump_deadline = False
 
-    def register_next_jump_deadline(seconds_until_due: float) -> None:
+    def register_next_jump_deadline(deadline: float) -> None:
         nonlocal registered_jump_deadline, next_jump_plot_deadline
         clear_registered_jump_deadline()
-        next_jump_plot_deadline = time.monotonic() + max(0.0, seconds_until_due)
+        next_jump_plot_deadline = deadline
         if queue_slot_id is None or sequence_queue is None:
             return
         _register_jump_deadline(
@@ -886,7 +885,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         for idx, system in enumerate(route_list):
             clear_registered_jump_deadline()
             total_time = 0
-            restock_not_before: float | None = None
             if idx < state.line_no:
                 continue
             jumps_left -= 1
@@ -900,10 +898,10 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             print("Please do not change windows until navigation is complete.")
             print(f"ETA: {arrival_time.strftime('%A, %I:%M%p (UTC%z)')}")
 
+            departing_time: datetime.datetime | int = 0
             try:
                 reap_pending_restock()
                 time_to_jump = 0
-                departing_time: datetime.datetime | int = 0
                 for _attempt in range(MAX_JUMP_PLOT_ATTEMPTS):
                     runtime_context.raise_if_cancelled()
                     jump_plot_deadline = None
@@ -935,11 +933,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 reap_pending_restock()
                 assert isinstance(departing_time, datetime.datetime)
                 next_jump_plot_deadline = None
-                restock_not_before = (
-                    time.monotonic()
-                    + time_to_jump
-                    + RESTOCK_TRIGGER_REMAINING_SECONDS
-                )
 
                 formatted_time = str(datetime.timedelta(seconds=time_to_jump))
                 departure_time_discord = f"<t:{departing_time.timestamp():.0f}:R>"
@@ -949,6 +942,21 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 )
 
                 journal.reset_jump()
+
+                if done_first:
+                    reap_pending_restock()
+                    if pending_restock is None:
+                        print("Submitting tritium restock after jump plot...")
+                        pending_restock = _run_coordinated_restock(
+                            sequence_queue=sequence_queue,
+                            queue_slot_id=queue_slot_id,
+                            cancel_event=runtime_context.cancel_event,
+                            runtime_context=runtime_context,
+                            options=options,
+                            sequence_dir=SEQUENCE_DIR,
+                            focus_handler=focus_dependency,
+                            not_before=time.monotonic(),
+                        )
 
                 total_time = max(0, time_to_jump - 6)
 
@@ -1060,8 +1068,18 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             state.line_no += 1
 
             print("Counting down until next jump...")
-            total_time = CARRIER_COOLDOWN_SECONDS
-            cooldown_deadline = time.monotonic() + CARRIER_COOLDOWN_SECONDS
+            assert isinstance(departing_time, datetime.datetime)
+            cooldown_end = departing_time + datetime.timedelta(
+                seconds=CARRIER_COOLDOWN_SECONDS
+            )
+            cooldown_remaining = max(
+                0.0,
+                (
+                    cooldown_end
+                    - datetime.datetime.now(datetime.timezone.utc)
+                ).total_seconds(),
+            )
+            cooldown_deadline = time.monotonic() + cooldown_remaining
             # Milestones and the restock trigger latch on a "crossed this
             # threshold" basis (fire once when total_time first falls at/below
             # the trigger), not on exact integer equality. The deadline-derived
@@ -1073,7 +1091,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             fired_milestones: set[int] = set()
             restock_triggered = False
             if idx + 1 < len(route_list):
-                register_next_jump_deadline(total_time)
+                register_next_jump_deadline(cooldown_deadline)
             while True:
                 total_time = max(0, int(cooldown_deadline - time.monotonic()))
                 if total_time <= 0:
@@ -1115,21 +1133,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     print("Jump complete!")
                     runtime_context.transition("running")
                     discord_messenger.update_fields(8, 7)
-                    if idx + 1 < len(route_list):
-                        assert restock_not_before is not None
-                        reap_pending_restock()
-                        if pending_restock is None:
-                            print("Scheduling tritium restock for five minutes after jump...")
-                            pending_restock = _run_coordinated_restock(
-                                sequence_queue=sequence_queue,
-                                queue_slot_id=queue_slot_id,
-                                cancel_event=runtime_context.cancel_event,
-                                runtime_context=runtime_context,
-                                options=options,
-                                sequence_dir=SEQUENCE_DIR,
-                                focus_handler=focus_dependency,
-                                not_before=restock_not_before,
-                            )
 
                 runtime_context.wait(1)
             print()
