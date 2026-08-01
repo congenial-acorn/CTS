@@ -1204,7 +1204,7 @@ def test_per_slot_options_use_slot_values_not_universal(
 
 
 # ---------------------------------------------------------------------------
-# Bug 1 regression: _run_default_traversal must accept & forward slot_id
+# Regression: _run_default_traversal must accept & forward slot_id
 # ---------------------------------------------------------------------------
 
 
@@ -1257,7 +1257,7 @@ def test_run_default_traversal_forwards_slot_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bug 6a regression: shared MultiJournalRouter injection
+# Regression: shared MultiJournalRouter injection
 # ---------------------------------------------------------------------------
 
 

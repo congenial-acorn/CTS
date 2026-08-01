@@ -244,7 +244,7 @@ class WorkerController(QObject):
         well-defined when the full set of starting slots is known up front, which
         a single manual click is not. Per-slot starts therefore dispatch in
         submission (click) order, which is the operator's explicit choice; use
-        "Start All" for strict slot-index ordering (Bug D). We do clear any stale
+        "Start All" for strict slot-index ordering. We do clear any stale
         shared first-cycle base left by a prior batch so each manual start
         captures a fresh base and ordering stays deterministic by construction.
         """
