@@ -519,13 +519,11 @@ def test_traversal_slot_passes_immediate_then_registered_cooldown_deadlines(
     assert registered_remaining == [pytest.approx(240.0)]
     assert jump_calls[1]["deadline"] == pytest.approx(registered_deadlines[-1])
     assert cast(float, jump_calls[1]["deadline"]) < cast(float, jump_calls[1]["seen_at"])
-    assert len(restock_calls) == 1
+    assert len(restock_calls) == 2
     assert restock_calls[0]["queue_slot_id"] == "slot-0"
-    assert restock_calls[0]["submitted_at"] == pytest.approx(
-        cast(float, jump_calls[1]["seen_at"])
-    )
-    assert restock_calls[0]["not_before"] == pytest.approx(
-        cast(float, restock_calls[0]["submitted_at"])
+    assert restock_calls[1]["queue_slot_id"] == "slot-0"
+    assert [call["not_before"] for call in restock_calls] == pytest.approx(
+        [call["submitted_at"] for call in restock_calls]
     )
     assert cleared_deadlines
 

@@ -817,6 +817,13 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
         _ = pending_restock.result(timeout=0)
         pending_restock = None
 
+    def finish_pending_restock() -> None:
+        nonlocal pending_restock
+        if pending_restock is None:
+            return
+        _ = pending_restock.result()
+        pending_restock = None
+
     def _handle_jump_cancelled(system_name: str, *, revert_index: bool) -> bool:
         nonlocal progress_saved
         clear_registered_jump_deadline()
@@ -942,21 +949,6 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                 )
 
                 journal.reset_jump()
-
-                if done_first:
-                    reap_pending_restock()
-                    if pending_restock is None:
-                        print("Submitting tritium restock after jump plot...")
-                        pending_restock = _run_coordinated_restock(
-                            sequence_queue=sequence_queue,
-                            queue_slot_id=queue_slot_id,
-                            cancel_event=runtime_context.cancel_event,
-                            runtime_context=runtime_context,
-                            options=options,
-                            sequence_dir=SEQUENCE_DIR,
-                            focus_handler=focus_dependency,
-                            not_before=time.monotonic(),
-                        )
 
                 total_time = max(0, time_to_jump - 6)
 
@@ -1133,6 +1125,18 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
                     print("Jump complete!")
                     runtime_context.transition("running")
                     discord_messenger.update_fields(8, 7)
+                    finish_pending_restock()
+                    print("Submitting tritium restock after confirmed jump...")
+                    pending_restock = _run_coordinated_restock(
+                        sequence_queue=sequence_queue,
+                        queue_slot_id=queue_slot_id,
+                        cancel_event=runtime_context.cancel_event,
+                        runtime_context=runtime_context,
+                        options=options,
+                        sequence_dir=SEQUENCE_DIR,
+                        focus_handler=focus_dependency,
+                        not_before=time.monotonic(),
+                    )
 
                 runtime_context.wait(1)
             print()

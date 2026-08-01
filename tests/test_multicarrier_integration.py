@@ -757,11 +757,19 @@ def test_restock_queue_submission_returns_completed_handle(tmp_path: Path) -> No
     expected_duration = 30.0 + 0.05 * 40
 
     assert queue.register_calls
-    assert len(queue.submit_restock_calls) == 1
-    assert queue.submit_restock_calls[0][0:2] == ("slot-0", expected_duration)
-    assert queue.submit_restock_calls[0][2] is not None
-    assert queue.submit_restock_calls[0][3] is not None
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert len(queue.submit_restock_calls) == 2
+    assert all(call[0:2] == ("slot-0", expected_duration) for call in queue.submit_restock_calls)
+    assert all(call[2] is not None for call in queue.submit_restock_calls)
+    assert all(call[3] is not None for call in queue.submit_restock_calls)
+    assert order == [
+        "jump-1",
+        "queue-result",
+        "restock",
+        "jump-2",
+        "queue-result",
+        "restock",
+        "jump-3",
+    ]
     assert queue.deadlines == {}
 
 
@@ -773,7 +781,7 @@ def test_restock_next_cycle_propagates_queue_failure(tmp_path: Path) -> None:
 
     assert queue.register_calls
     assert len(queue.submit_restock_calls) == 1
-    assert order == ["jump-1", "jump-2", "queue-result"]
+    assert order == ["jump-1", "queue-result"]
     assert queue.deadlines == {}
 
 
@@ -880,16 +888,24 @@ def test_restock_not_before_is_derived_without_changing_jump_countdown(
     """Restock scheduling does not consume or mutate the plotted jump countdown."""
     queue, order = _run_restock_cycle(tmp_path)
 
-    assert len(queue.submit_restock_calls) == 1
+    assert len(queue.submit_restock_calls) == 2
     assert all(call[3] is not None for call in queue.submit_restock_calls)
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert order == [
+        "jump-1",
+        "queue-result",
+        "restock",
+        "jump-2",
+        "queue-result",
+        "restock",
+        "jump-3",
+    ]
     assert len(queue.register_calls) >= 2
     assert all(call[0] == "slot-0" for call in queue.register_calls)
     assert queue.deadlines == {}
     assert "slot-0" in queue.clear_calls
 
 
-def test_first_cycle_skips_restock(tmp_path: Path) -> None:
+def test_startup_waits_for_first_confirmed_jump_before_restock(tmp_path: Path) -> None:
     queue, order = _run_restock_cycle(
         tmp_path,
         route_list=["A"],
@@ -897,16 +913,24 @@ def test_first_cycle_skips_restock(tmp_path: Path) -> None:
         expected_result=True,
     )
 
-    assert order == ["jump-1"]
-    assert queue.submit_restock_calls == []
+    assert order == ["jump-1", "queue-result", "restock"]
+    assert len(queue.submit_restock_calls) == 1
     assert queue.deadlines == {}
 
 
-def test_restock_is_scheduled_after_next_successful_plot(tmp_path: Path) -> None:
+def test_restock_is_scheduled_after_each_confirmed_jump(tmp_path: Path) -> None:
     queue, order = _run_restock_cycle(tmp_path)
 
-    assert len(queue.submit_restock_calls) == 1
-    assert order == ["jump-1", "jump-2", "queue-result", "restock", "jump-3"]
+    assert len(queue.submit_restock_calls) == 2
+    assert order == [
+        "jump-1",
+        "queue-result",
+        "restock",
+        "jump-2",
+        "queue-result",
+        "restock",
+        "jump-3",
+    ]
 
 
 # ---------------------------------------------------------------------------
