@@ -656,7 +656,7 @@ class DashboardWidget(QWidget):
             # with the worker's own "slot-{idx}" key. The queue pops the
             # registered cooldown deadline for the submitted slot_id on every
             # jump submission; sharing the worker's key would delete the worker's
-            # cross-carrier non-overlap deadline (Bug B).
+            # cross-carrier non-overlap deadline.
             submit_func = lambda run, deadline, cancel_event: submit_jump_plot(
                 slot_id=f"slot-{slot_index}-scheduled",
                 run=run,

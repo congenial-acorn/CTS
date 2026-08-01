@@ -808,7 +808,7 @@ def test_start_all_emits_no_ready_carriers(qapp, config, binding_controller, wor
 
 
 # ---------------------------------------------------------------------------
-# Test: sync_slots called immediately after binding updates (Bug 7)
+# Test: sync_slots called immediately after binding updates
 # ---------------------------------------------------------------------------
 
 class TestSyncSlotsAfterBinding:
