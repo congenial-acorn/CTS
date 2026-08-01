@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, cast, final
 from unittest.mock import MagicMock, patch
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QCoreApplication, QEvent, QThread
 from PySide6.QtWidgets import QApplication
 
 from TraversalSystem.config import TraversalOptions
@@ -142,6 +142,11 @@ def _wait_for_controller_idle(
         app,
         lambda: all(records[idx].thread is None for idx in slot_indices),
     )
+    for thread in controller.findChildren(QThread):
+        thread.quit()
+        assert thread.wait(2_000)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
 
 
 def _shared_sequence_queue(controller: WorkerController) -> SequenceQueue | None:

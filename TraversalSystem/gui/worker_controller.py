@@ -374,10 +374,10 @@ class WorkerController(QObject):
 
     def stop_all_active(self) -> list[int]:
         stopped: list[int] = []
-        for slot_index in sorted(self._records):
+        for slot_index in sorted(self._records, reverse=True):
             if self.stop_slot(slot_index):
                 stopped.append(slot_index)
-        return stopped
+        return sorted(stopped)
 
     def peek_shared_sequence_queue(self) -> object | None:
         return self._shared_sequence_queue_dependency
