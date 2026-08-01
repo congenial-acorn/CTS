@@ -163,7 +163,7 @@ class FocusAwareInputHandler:
         Holding ``input_handler.dispatch_lock`` across both halves makes the
         focus-then-input pair atomic relative to every other worker, so a
         concurrent worker cannot steal focus in the gap and land input on the
-        wrong window (Bug G).
+        wrong window.
         """
         with _real_input_handler.dispatch_lock:
             self._ensure_focus()
