@@ -401,7 +401,7 @@ def _assert_pending_jump_restock_order(
     return submit_calls
 
 
-def test_future_jump_deadline_allows_restock_to_run_before_pending_jump(
+def test_older_pending_jump_runs_before_newer_feasible_restock(
     tmp_path: Path,
 ) -> None:
     jump_deadline = 300.0
@@ -409,7 +409,7 @@ def test_future_jump_deadline_allows_restock_to_run_before_pending_jump(
     submit_calls = _assert_pending_jump_restock_order(
         tmp_path,
         jump_deadline=jump_deadline,
-        expected_order=["active", "restock", "jump"],
+        expected_order=["active", "jump", "restock"],
     )
 
     jump_call = next(call for call in submit_calls if call["slot_id"] == "slot-jump")
@@ -1047,6 +1047,49 @@ def test_first_cycle_barrier_holds_head_block_until_siblings_arrive(
     assert execution_order == [0, 1, 2], (
         f"Expected slot-index order [0, 1, 2], got {execution_order}"
     )
+
+
+def test_first_cycle_barrier_withholds_restock_until_siblings_arrive(
+    tmp_path: Path,
+) -> None:
+    _ = _load_main_with_mocks(tmp_path)
+    queue = SequenceQueue()
+    queue.arm_first_cycle_barrier(expected_count=2, timeout_seconds=5.0)
+    restock_started = threading.Event()
+
+    try:
+        restock = queue.submit_restock(
+            slot_id="slot-restock",
+            run=lambda: restock_started.set(),
+            estimated_duration=1.0,
+            cancel_event=threading.Event(),
+        )
+
+        assert restock_started.wait(0.1) is False
+
+        base = time.monotonic() + 100.0
+        first_jump = queue.submit_jump_plot(
+            slot_id="slot-0",
+            run=lambda: None,
+            deadline=base,
+            estimated_duration=1.0,
+            cancel_event=threading.Event(),
+        )
+        assert restock_started.wait(0.1) is False
+
+        second_jump = queue.submit_jump_plot(
+            slot_id="slot-1",
+            run=lambda: None,
+            deadline=base + 1.0,
+            estimated_duration=1.0,
+            cancel_event=threading.Event(),
+        )
+
+        assert restock.done.wait(1.0)
+        assert first_jump.done.wait(1.0)
+        assert second_jump.done.wait(1.0)
+    finally:
+        queue.shutdown()
 
 
 def test_first_cycle_barrier_releases_on_timeout_when_sibling_missing(

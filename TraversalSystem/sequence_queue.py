@@ -204,13 +204,13 @@ class SequenceQueue:
     ) -> None:
         """Arm the first-cycle ordering barrier for a start batch.
 
-        Holds dispatch of every ``jump_plot`` block until *expected_count* of
-        them are pending simultaneously (or *timeout_seconds* elapses), so the
-        deadline sort can order them by slot index instead of executing the
-        first-submitted block while the queue is idle. Resets the shared base so
-        each batch re-captures it. Call once, before the workers begin claiming
-        deadlines; pairs with ``claim_first_cycle_deadline``. With one or zero
-        expected blocks ordering is moot, so the barrier opens immediately.
+        Holds all dispatch until *expected_count* ``jump_plot`` blocks are
+        pending simultaneously (or *timeout_seconds* elapses), so unrelated
+        work cannot bypass the batch while the deadline sort orders jumps by
+        slot index. Resets the shared base so each batch re-captures it. Call
+        once, before the workers begin claiming deadlines; pairs with
+        ``claim_first_cycle_deadline``. With one or zero expected blocks
+        ordering is moot, so the barrier opens immediately.
         """
         with self._condition:
             self._first_cycle_base = None
@@ -234,7 +234,7 @@ class SequenceQueue:
             self._first_cycle_base = None
 
     def _first_cycle_barrier_open_locked(self) -> bool:
-        """Return whether gated ``jump_plot`` blocks may now be dispatched.
+        """Return whether queued blocks may now be dispatched.
 
         Latches open once every expected sibling has arrived or the barrier
         timeout passes, so it never re-closes within a batch. Caller must hold
@@ -352,33 +352,42 @@ class SequenceQueue:
         if not self._pending:
             return None
 
-        if self._first_cycle_barrier_open_locked():
-            jumps = sorted(
-                (block for block in self._pending if block.kind == "jump_plot"),
-                key=lambda block: (block.handle.deadline, block.sequence),
-            )
-        else:
-            # First-cycle barrier still closed: withhold every jump block until
-            # all expected siblings are pending so the sort above orders them by
-            # slot index rather than dispatching whichever arrived first.
-            jumps = []
+        if not self._first_cycle_barrier_open_locked():
+            return None
+
+        jumps = sorted(
+            (block for block in self._pending if block.kind == "jump_plot"),
+            key=lambda block: (block.handle.deadline, block.sequence),
+        )
         restocks = sorted(
             (block for block in self._pending if block.kind == "restock"),
             key=lambda block: block.sequence,
         )
-        earliest_jump_deadline = self._earliest_jump_deadline_locked()
-        next_restock = self._first_feasible_restock_locked(
-            restocks,
-            earliest_jump_deadline,
-        )
 
         if jumps:
             earliest_jump = jumps[0]
+            deadline = earliest_jump.handle.deadline
+            if deadline is not None and deadline <= self._time_fn():
+                return earliest_jump
+
+            oldest_jump_sequence = min(jump.sequence for jump in jumps)
+            older_restocks = [
+                restock
+                for restock in restocks
+                if restock.sequence < oldest_jump_sequence
+            ]
+            next_restock = self._first_feasible_restock_locked(
+                older_restocks,
+                self._earliest_jump_deadline_locked(),
+            )
             if next_restock is not None:
                 return next_restock
             return earliest_jump
 
-        return next_restock
+        return self._first_feasible_restock_locked(
+            restocks,
+            self._earliest_jump_deadline_locked(),
+        )
 
     def _earliest_jump_deadline_locked(self) -> float | None:
         self._prune_stale_registered_deadlines_locked()

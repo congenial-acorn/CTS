@@ -294,7 +294,7 @@ def test_one_active_block_at_a_time_and_result_propagation() -> None:
         _shutdown_queue(queue)
 
 
-def test_deadline_jump_plot_uses_earliest_deadline_first() -> None:
+def test_pending_jumps_use_deadline_order_before_newer_restock() -> None:
     clock = _ManualClock()
     queue, _cancelled_error = _make_queue(clock)
     active_started = threading.Event()
@@ -331,6 +331,12 @@ def test_deadline_jump_plot_uses_earliest_deadline_first() -> None:
             estimated_duration=30.0,
             run=make_jump("jump-late"),
         )
+        restock = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=5.0,
+            run=lambda: execution_order.append("restock") or "restock",
+        )
         earlier = _submit_jump_plot(
             queue,
             slot_id="slot-early",
@@ -343,8 +349,59 @@ def test_deadline_jump_plot_uses_earliest_deadline_first() -> None:
 
         assert earlier.done.wait(1.0)
         assert later.done.wait(1.0)
-        assert execution_order == ["active", "jump-early", "jump-late"]
+        assert restock.done.wait(1.0)
+        assert execution_order == ["active", "jump-early", "jump-late", "restock"]
     finally:
+        _shutdown_queue(queue)
+
+
+@pytest.mark.parametrize("deadline_offset", [0.0, -1.0], ids=["due", "overdue"])
+def test_due_jump_plot_runs_before_newer_feasible_restock(
+    deadline_offset: float,
+) -> None:
+    clock = _ManualClock(start=100.0)
+    queue, _cancelled_error = _make_queue(clock)
+    active_started = threading.Event()
+    release_active = threading.Event()
+    execution_order: list[str] = []
+
+    def active_jump() -> str:
+        execution_order.append("active")
+        active_started.set()
+        assert release_active.wait(1.0)
+        return "active"
+
+    try:
+        _ = _submit_jump_plot(
+            queue,
+            slot_id="slot-active",
+            deadline=clock.now() + 1000.0,
+            estimated_duration=30.0,
+            run=active_jump,
+        )
+        assert active_started.wait(1.0)
+
+        jump = _submit_jump_plot(
+            queue,
+            slot_id="slot-jump",
+            deadline=clock.now() + deadline_offset,
+            estimated_duration=30.0,
+            run=lambda: execution_order.append("jump") or "jump",
+        )
+        restock = _submit_restock(
+            queue,
+            slot_id="slot-restock",
+            estimated_duration=5.0,
+            run=lambda: execution_order.append("restock") or "restock",
+        )
+
+        release_active.set()
+
+        assert jump.done.wait(1.0)
+        assert restock.done.wait(1.0)
+        assert execution_order == ["active", "jump", "restock"]
+    finally:
+        release_active.set()
         _shutdown_queue(queue)
 
 
@@ -440,7 +497,7 @@ def test_restock_not_before_blocks_dispatch_without_jump_deadline() -> None:
         _shutdown_queue(queue)
 
 
-def test_long_restock_runs_after_current_jump_deadline_before_next_plot() -> None:
+def test_due_jump_runs_before_older_long_restock() -> None:
     clock = _ManualClock(start=100.0)
     queue, _cancelled_error = _make_queue(clock)
     restock_started = threading.Event()
@@ -484,13 +541,12 @@ def test_long_restock_runs_after_current_jump_deadline_before_next_plot() -> Non
             run=jump,
         )
 
-        assert restock_started.wait(1.0)
-        assert jump_started.wait(0.05) is False
-        release_restock.set()
         assert jump_started.wait(1.0)
+        assert restock_started.wait(1.0)
+        release_restock.set()
         assert restock_handle.result(timeout=0.1) == "restock"
         assert jump_handle.result(timeout=0.1) == "jump"
-        assert execution_order == ["restock", "jump"]
+        assert execution_order == ["jump", "restock"]
     finally:
         release_restock.set()
         _shutdown_queue(queue)
