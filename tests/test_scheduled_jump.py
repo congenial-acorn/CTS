@@ -99,7 +99,7 @@ class TestScheduledJumpController:
 
     def test_schedule_with_past_time_rolls_to_tomorrow(self, qapp):
         # A time-of-day earlier than "now" must schedule for the same time
-        # tomorrow (consistent with _build_target_datetime), not raise (Bug E).
+        # tomorrow (consistent with _build_target_datetime), not raise.
         now = _utc(2026, 1, 1, 12, 0, 0)
         controller = ScheduledJumpController(
             time_provider=lambda: now,

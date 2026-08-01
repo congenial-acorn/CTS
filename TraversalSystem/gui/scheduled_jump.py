@@ -97,7 +97,7 @@ class ScheduledJumpController(QObject):
 
         *target_utc* is a time-of-day, not a full datetime. If it has already
         passed today it rolls forward to the same time tomorrow — consistent
-        with ``_build_target_datetime`` used by the per-tick countdown (Bug E).
+        with ``_build_target_datetime`` used by the per-tick countdown.
         This lets an operator schedule "for tomorrow morning" in the evening.
         """
         self.cancel()  # clear any existing schedule
@@ -148,7 +148,7 @@ class ScheduledJumpController(QObject):
                 # queue's restock-feasibility gate excludes deadlines that are
                 # already <= now (strict `> now`), so a bare time.monotonic()
                 # deadline would fail to gate concurrent restocks and the click
-                # could be delayed behind one (Bug C). A small positive offset
+                # could be delayed behind one. A small positive offset
                 # keeps it the earliest jump while still gating.
                 self._submit_func(
                     self._make_fire_block(),
@@ -223,7 +223,7 @@ class ScheduledJumpController(QObject):
         def run() -> None:
             # Hold the process-wide dispatch lock across focus + click so the
             # scheduled click cannot interleave with a worker's focus-then-input
-            # critical section (Bug G).
+            # critical section.
             with _input_handler.dispatch_lock:
                 focus(binding)
                 self._click_func(button_x, button_y)
