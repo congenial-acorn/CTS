@@ -1085,7 +1085,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
             # the trigger), not on exact integer equality. The deadline-derived
             # countdown can skip integers if the loop ever stalls (e.g. the
             # blocking restock-confirmation wait below); exact-equality
-            # matchers would silently skip any value stepped over (Bug F).
+            # matchers would silently skip any value stepped over.
             # Thresholds are listed in descending order.
             cooldown_milestones = ((340, 6, 7), (320, 7, 7), (151, 8, 8), (100, 8, 9))
             fired_milestones: set[int] = set()
