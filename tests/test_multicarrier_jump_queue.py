@@ -1117,7 +1117,7 @@ def test_first_cycle_barrier_releases_on_timeout_when_sibling_missing(
         queue.shutdown()
 
 
-def test_traversal_slot_skips_restock_on_final_route_element(tmp_path: Path) -> None:
+def test_traversal_slot_refuels_after_first_and_final_jump(tmp_path: Path) -> None:
     main = _load_main_with_mocks(tmp_path)
     clock = _ManualClock(start=1000.0)
     options = _make_options(tmp_path)
@@ -1141,6 +1141,8 @@ def test_traversal_slot_skips_restock_on_final_route_element(tmp_path: Path) -> 
     def fake_run_coordinated_jump_plot(**_kwargs: object) -> tuple[int, datetime.datetime]:
         return 6, departure
 
+    pending_restock = MagicMock()
+
     with patch("builtins.print"), \
          patch.object(main, "DiscordHandler", return_value=MagicMock()), \
          patch.object(main, "Reshandler", _FakeResHandler), \
@@ -1150,10 +1152,15 @@ def test_traversal_slot_skips_restock_on_final_route_element(tmp_path: Path) -> 
          patch.object(main.time, "monotonic", side_effect=clock.now), \
          patch.object(main.time, "sleep", side_effect=clock.advance), \
          patch.object(main, "_run_coordinated_jump_plot", side_effect=fake_run_coordinated_jump_plot), \
-         patch.object(main, "_run_coordinated_restock") as restock_mock:
+         patch.object(
+             main,
+             "_run_coordinated_restock",
+             return_value=pending_restock,
+         ) as restock_mock:
         assert main._run_traversal_slot(runtime_context) is True
 
-    restock_mock.assert_not_called()
+    restock_mock.assert_called_once()
+    pending_restock.result.assert_called_once_with()
 
 
 def test_journal_confirmation_timeout_stops_slot(tmp_path: Path) -> None:

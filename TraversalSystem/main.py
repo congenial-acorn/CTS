@@ -1145,6 +1145,7 @@ def _run_traversal_slot(runtime_context: TraversalRuntimeContext) -> bool:
 
             done_first = True
 
+        finish_pending_restock()
         state.route_complete = True
         print("Route complete!")
         discord_messenger.post_to_discord(
